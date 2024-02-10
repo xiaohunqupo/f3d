@@ -1,4 +1,15 @@
-include(${CMAKE_SOURCE_DIR}/cmake/f3dPlugin.cmake)
+cmake_minimum_required(VERSION 3.21)
+
+project(f3d-plugin-assimp)
+
+include(GNUInstallDirs)
+
+# Check if the plugin is built externally
+if(PROJECT_IS_TOP_LEVEL)
+  find_package(f3d REQUIRED)
+else()
+  include(f3dPlugin)
+endif()
 
 find_package(assimp 5.0 REQUIRED)
 
@@ -47,6 +58,22 @@ f3d_plugin_declare_reader(
   FORMAT_DESCRIPTION "Object File Format"
 )
 
+f3d_plugin_declare_reader(
+  NAME DirectX
+  EXTENSIONS x
+  MIMETYPES application/vnd.x
+  VTK_IMPORTER vtkF3DAssimpImporter
+  FORMAT_DESCRIPTION "DirectX File Format"
+)
+
+f3d_plugin_declare_reader(
+  NAME 3MF
+  EXTENSIONS 3mf
+  MIMETYPES model/3mf
+  VTK_IMPORTER vtkF3DAssimpImporter
+  FORMAT_DESCRIPTION "3D Manufacturing Format"
+)
+
 set(rpaths "")
 get_target_property(target_type assimp::assimp TYPE)
 if (target_type STREQUAL SHARED_LIBRARY)
@@ -57,8 +84,9 @@ f3d_plugin_build(
   NAME assimp
   VERSION 1.0
   DESCRIPTION "Assimp support (version ${assimp_VERSION})"
-  VTK_MODULES CommonCore CommonExecutionModel IOImport
+  VTK_MODULES IOImage RenderingOpenGL2
   ADDITIONAL_RPATHS ${rpaths}
   MIMETYPE_XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/f3d-assimp-formats.xml"
+  CONFIGURATION_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/configs/config.d" "${CMAKE_CURRENT_SOURCE_DIR}/configs/thumbnail.d"
   FREEDESKTOP
 )

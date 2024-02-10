@@ -22,16 +22,26 @@ namespace f3d
  * Configured on creation using an enum, then all objects
  * can be accessed through their getter.
  *
- * Example usage:
+ * Example usage for a default scene file:
  *
  * \code{.cpp}
  *  f3d::engine eng(f3d::engine::CREATE_WINDOW | f3d::engine::CREATE_INTERACTOR);
  *  f3d::loader& load = eng.getLoader();
- *  load.addFile("path/to/file");
- *  load.loadFile(f3d::loader::LoadFileEnum::LOAD_CURRENT);
+ *  load.loadGeometry("path/to/file").loadGeometry("path/to/another/file");
  *  f3d::interactor& inter = eng.getInteractor();
  *  inter.start();
  * \endcode
+ *
+ * Example usage for a full scene file:
+ *
+ * \code{.cpp}
+ *  f3d::engine eng(f3d::engine::CREATE_WINDOW | f3d::engine::CREATE_INTERACTOR);
+ *  f3d::loader& load = eng.getLoader();
+ *  load.loadScene("path/to/file");
+ *  f3d::interactor& inter = eng.getInteractor();
+ *  inter.start();
+ * \endcode
+
  */
 class F3D_EXPORT engine
 {
@@ -102,15 +112,18 @@ public:
   /**
    * Load a plugin.
    * Supports full path, relative path, and plugin name.
-   * On Linux and macOS, uses LD_LIBRARY_PATH to find the plugin.
-   * On Windows, the plugin should be located in the same folder as the executable.
+   * First try to load the plugin by name from the static plugins.
+   * Then try to load the path provided as if it is a full path to a plugin.
+   * Then try to load a plugin by its name looking into the provided plugin search paths.
+   * Then try to load a plugin by its name relying on internal system (eg: LD_LIBRARY_PATH).
    * The plugin "native" is always available and includes native VTK readers.
    * If built and available in your build, F3D is providing 5 additional plugins:
-   * "alembic", "assimp", "draco", "exodus", "occt".
+   * "alembic", "assimp", "draco", "exodus", "occt", "usd".
    * Custom plugins can also be available that F3D is not supporting officially.
    * Throw a plugin_exception if the plugin can't be loaded for some reason.
    */
-  static void loadPlugin(const std::string& path);
+  static void loadPlugin(
+    const std::string& nameOrPath, const std::vector<std::string>& pluginSearchPaths = {});
 
   /**
    * Automatically load all the static plugins.
@@ -119,17 +132,26 @@ public:
   static void autoloadPlugins();
 
   /**
+   * List plugins based on associated json files located in the given directory.
+   * Listed plugins can be loaded using engine::loadPlugin function.
+   * Note that the listed plugins may fail to load if the library is not found or incompatible.
+   */
+  static std::vector<std::string> getPluginsList(const std::string& pluginPath);
+
+  /**
    * A structure providing information about the libf3d.
    * Returned by getLibInfo().
    */
   struct libInformation
   {
     std::string Version;
+    std::string VersionFull;
     std::string BuildDate;
     std::string BuildSystem;
     std::string Compiler;
     std::string RaytracingModule;
     std::string ExternalRenderingModule;
+    std::string OpenEXRModule;
     std::string VTKVersion;
     std::string PreviousCopyright;
     std::string Copyright;
@@ -153,6 +175,8 @@ public:
     std::vector<std::string> Extensions;
     std::vector<std::string> MimeTypes;
     std::string PluginName;
+    bool HasSceneReader;
+    bool HasGeometryReader;
   };
 
   /**
@@ -166,7 +190,7 @@ public:
    */
   struct no_window_exception : public exception
   {
-    no_window_exception(const std::string& what = "");
+    explicit no_window_exception(const std::string& what = "");
   };
 
   /**
@@ -175,7 +199,7 @@ public:
    */
   struct no_interactor_exception : public exception
   {
-    no_interactor_exception(const std::string& what = "");
+    explicit no_interactor_exception(const std::string& what = "");
   };
 
   /**
@@ -184,7 +208,7 @@ public:
    */
   struct plugin_exception : public exception
   {
-    plugin_exception(const std::string& what = "");
+    explicit plugin_exception(const std::string& what = "");
   };
 
 private:

@@ -1,4 +1,15 @@
-include(${CMAKE_SOURCE_DIR}/cmake/f3dPlugin.cmake)
+cmake_minimum_required(VERSION 3.21)
+
+project(f3d-plugin-alembic)
+
+include(GNUInstallDirs)
+
+# Check if the plugin is built externally
+if(PROJECT_IS_TOP_LEVEL)
+  find_package(f3d REQUIRED)
+else()
+  include(f3dPlugin)
+endif()
 
 find_package(Alembic 1.7 REQUIRED)
 
@@ -10,7 +21,7 @@ f3d_plugin_declare_reader(
   NAME Alembic
   EXTENSIONS abc
   MIMETYPES application/vnd.abc
-  VTK_IMPORTER vtkF3DAlembicImporter
+  VTK_READER vtkF3DAlembicReader
   FORMAT_DESCRIPTION "Alembic"
 )
 
@@ -28,8 +39,9 @@ f3d_plugin_build(
   NAME alembic
   VERSION 1.0
   DESCRIPTION "Alembic support (version ${Alembic_VERSION})"
-  VTK_MODULES CommonCore CommonExecutionModel IOImport
+  VTK_MODULES IOImage
   ADDITIONAL_RPATHS ${rpaths}
   MIMETYPE_XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/f3d-alembic-formats.xml"
+  CONFIGURATION_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/configs/config.d" "${CMAKE_CURRENT_SOURCE_DIR}/configs/thumbnail.d"
   FREEDESKTOP
 )

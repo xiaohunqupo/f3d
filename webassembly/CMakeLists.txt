@@ -3,7 +3,6 @@ cmake_minimum_required(VERSION 3.12)
 add_executable(f3djs F3DEmscriptenBindings.cxx)
 
 set_target_properties(f3djs PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   OUTPUT_NAME f3d
 )
 
@@ -12,7 +11,7 @@ target_link_libraries(f3djs PRIVATE libf3d)
 target_link_options(f3djs PRIVATE
   "--bind"
   "-O1"
-  "SHELL:--preload-file ${CMAKE_SOURCE_DIR}/testing/data@/"
+  "SHELL:--preload-file ${F3D_SOURCE_DIR}/testing/data@/"
   "SHELL:-sEXPORT_NAME=f3d"
   "SHELL:-sALLOW_MEMORY_GROWTH=1"
   "SHELL:-sDEMANGLE_SUPPORT=1"

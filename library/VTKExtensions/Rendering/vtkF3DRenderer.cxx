@@ -1,9 +1,11 @@
 #include "vtkF3DRenderer.h"
 
+#include "F3DDefaultHDRI.h"
 #include "F3DLog.h"
 #include "vtkF3DCachedLUTTexture.h"
 #include "vtkF3DCachedSpecularTexture.h"
 #include "vtkF3DConfigure.h"
+#include "vtkF3DDropZoneActor.h"
 #include "vtkF3DOpenGLGridMapper.h"
 #include "vtkF3DRenderPass.h"
 
@@ -26,6 +28,7 @@
 #include <vtkOpenGLRenderer.h>
 #include <vtkOpenGLTexture.h>
 #include <vtkPBRLUTTexture.h>
+#include <vtkPNGReader.h>
 #include <vtkPixelBufferObject.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindow.h>
@@ -41,8 +44,13 @@
 #include <vtkXMLMultiBlockDataWriter.h>
 #include <vtkXMLTableReader.h>
 #include <vtkXMLTableWriter.h>
+#include <vtksys/FStream.hxx>
 #include <vtksys/MD5.h>
 #include <vtksys/SystemTools.hxx>
+
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+#include <vtkSphericalHarmonics.h>
+#endif
 
 #if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20220907)
 #include <vtkOrientationMarkerWidget.h>
@@ -58,30 +66,31 @@
 
 #include <cctype>
 #include <chrono>
+#include <regex>
 #include <sstream>
-
-vtkStandardNewMacro(vtkF3DRenderer);
 
 namespace
 {
 #if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
 //----------------------------------------------------------------------------
-// Compute the MD5 hash of the scalar field of an image data
-std::string ComputeImageHash(vtkImageData* image)
+// Compute the MD5 hash of an existing file on disk
+std::string ComputeFileHash(const std::string& filepath)
 {
   unsigned char digest[16];
   char md5Hash[33];
   md5Hash[32] = '\0';
 
-  unsigned char* content = reinterpret_cast<unsigned char*>(image->GetScalarPointer());
-  int* dims = image->GetDimensions();
-  int nbComp = image->GetNumberOfScalarComponents();
-  int scalarSize = image->GetScalarSize();
-  int size = nbComp * scalarSize * dims[0] * dims[1] * dims[2];
+  std::size_t length = vtksys::SystemTools::FileLength(filepath);
+  std::vector<char> buffer(length);
+
+  vtksys::ifstream file;
+  file.open(filepath.c_str(), std::ios_base::binary);
+  file.read(buffer.data(), length);
 
   vtksysMD5* md5 = vtksysMD5_New();
   vtksysMD5_Initialize(md5);
-  vtksysMD5_Append(md5, content, size);
+  vtksysMD5_Append(
+    md5, reinterpret_cast<const unsigned char*>(buffer.data()), static_cast<int>(length));
   vtksysMD5_Finalize(md5, digest);
   vtksysMD5_DigestToHex(digest, md5Hash);
   vtksysMD5_Delete(md5);
@@ -121,31 +130,53 @@ vtkF3DRenderer::vtkF3DRenderer()
 {
   this->Cullers->RemoveAllItems();
   this->AutomaticLightCreationOff();
+  this->SetClippingRangeExpansion(0.99);
+
+  // Create cached texture
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 3, 20230902)
+  this->EnvMapLookupTable = vtkSmartPointer<vtkF3DCachedLUTTexture>::New();
+  this->EnvMapPrefiltered = vtkSmartPointer<vtkF3DCachedSpecularTexture>::New();
+#else
+  this->EnvMapLookupTable = vtkF3DCachedLUTTexture::New();
+  this->EnvMapPrefiltered = vtkF3DCachedSpecularTexture::New();
+#endif
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+  this->EnvMapPrefiltered->HalfPrecisionOff();
+#endif
 
   // Init actors
-  this->MetaDataActor->GetTextProperty()->SetFontSize(15);
-  this->MetaDataActor->GetTextProperty()->SetOpacity(0.5);
-  this->MetaDataActor->GetTextProperty()->SetBackgroundColor(0, 0, 0);
-  this->MetaDataActor->GetTextProperty()->SetBackgroundOpacity(0.5);
+  vtkNew<vtkTextProperty> textProp;
+  textProp->SetFontSize(14);
+  textProp->SetOpacity(1.0);
+  textProp->SetBackgroundColor(0, 0, 0);
+  textProp->SetBackgroundOpacity(0.8);
+
+  this->MetaDataActor->SetTextProperty(textProp);
 
   this->TimerActor->GetTextProperty()->SetFontSize(15);
   this->TimerActor->SetPosition(10, 10);
   this->TimerActor->SetInput("0 fps");
 
-  this->CheatSheetActor->GetTextProperty()->SetFontSize(15);
-  this->CheatSheetActor->GetTextProperty()->SetOpacity(0.5);
-  this->CheatSheetActor->GetTextProperty()->SetBackgroundColor(0, 0, 0);
-  this->CheatSheetActor->GetTextProperty()->SetBackgroundOpacity(0.5);
+  this->CheatSheetActor->SetTextProperty(textProp);
 
   this->FilenameActor->GetTextProperty()->SetFontFamilyToCourier();
   this->MetaDataActor->GetTextProperty()->SetFontFamilyToCourier();
   this->TimerActor->GetTextProperty()->SetFontFamilyToCourier();
   this->CheatSheetActor->GetTextProperty()->SetFontFamilyToCourier();
+  this->DropZoneActor->GetTextProperty()->SetFontFamilyToCourier();
 
-  this->FilenameActor->SetVisibility(false);
-  this->MetaDataActor->SetVisibility(false);
-  this->TimerActor->SetVisibility(false);
-  this->CheatSheetActor->SetVisibility(false);
+  this->SkyboxActor->SetProjection(vtkSkybox::Sphere);
+  // First version of VTK including the version check (and the feature used)
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20200527)
+  this->SkyboxActor->GammaCorrectOn();
+#endif
+
+  this->FilenameActor->VisibilityOff();
+  this->MetaDataActor->VisibilityOff();
+  this->TimerActor->VisibilityOff();
+  this->CheatSheetActor->VisibilityOff();
+  this->DropZoneActor->VisibilityOff();
+  this->SkyboxActor->VisibilityOff();
 }
 
 //----------------------------------------------------------------------------
@@ -163,59 +194,77 @@ void vtkF3DRenderer::ReleaseGraphicsResources(vtkWindow* w)
 }
 
 //----------------------------------------------------------------------------
-void vtkF3DRenderer::Initialize(const std::string& fileInfo, const std::string& up)
+void vtkF3DRenderer::Initialize(const std::string& up)
 {
-  this->RemoveAllViewProps();
-  this->RemoveAllLights();
   this->OriginalLightIntensities.clear();
 
   this->AddActor(this->FilenameActor);
   this->AddActor(this->GridActor);
   this->AddActor(this->TimerActor);
   this->AddActor(this->MetaDataActor);
+  this->AddActor(this->DropZoneActor);
   this->AddActor(this->CheatSheetActor);
+  this->AddActor(this->SkyboxActor);
 
-  this->FilenameActor->SetText(vtkCornerAnnotation::UpperEdge, fileInfo.c_str());
-  this->GridInitialized = false;
+  this->GridConfigured = false;
+  this->CheatSheetConfigured = false;
+  this->ActorsPropertiesConfigured = false;
+  this->RenderPassesConfigured = false;
+  this->LightIntensitiesConfigured = false;
+  this->TextActorsConfigured = false;
+  this->MetaDataConfigured = false;
+  this->HDRITextureConfigured = false;
+  this->HDRILUTConfigured = false;
+  this->HDRISphericalHarmonicsConfigured = false;
+  this->HDRISpecularConfigured = false;
+  this->HDRISkyboxConfigured = false;
+
   this->GridInfo = "";
 
   // Importer rely on the Environment being set, so this is needed in the initialization
-  if (up.size() == 2)
+  const std::regex re("([-+]?)([XYZ])", std::regex_constants::icase);
+  std::smatch match;
+  if (std::regex_match(up, match, re))
   {
-    char sign = up[0];
-    char axis = std::toupper(up[1]);
-    if ((sign == '-' || sign == '+') && (axis >= 'X' && axis <= 'Z'))
-    {
-      this->UpIndex = axis - 'X';
-      std::fill(this->UpVector, this->UpVector + 3, 0);
-      this->UpVector[this->UpIndex] = (sign == '+') ? 1.0 : -1.0;
+    const float sign = match[1].str() == "-" ? -1.0 : +1.0;
+    const int index = std::toupper(match[2].str()[0]) - 'X';
+    assert(index >= 0 && index < 3);
 
-      std::fill(this->RightVector, this->RightVector + 3, 0);
-      this->RightVector[this->UpIndex == 0 ? 1 : 0] = 1.0;
+    this->UpIndex = index;
 
-      double pos[3];
-      vtkMath::Cross(this->UpVector, this->RightVector, pos);
-      vtkMath::MultiplyScalar(pos, -1.0);
+    std::fill(this->UpVector, this->UpVector + 3, 0);
+    this->UpVector[this->UpIndex] = sign;
 
-      vtkCamera* cam = this->GetActiveCamera();
-      cam->SetFocalPoint(0.0, 0.0, 0.0);
-      cam->SetPosition(pos);
-      cam->SetViewUp(this->UpVector);
+    std::fill(this->RightVector, this->RightVector + 3, 0);
+    this->RightVector[this->UpIndex == 0 ? 1 : 0] = 1.0;
 
-      this->SetEnvironmentUp(this->UpVector);
-      this->SetEnvironmentRight(this->RightVector);
-    }
+    double pos[3];
+    vtkMath::Cross(this->UpVector, this->RightVector, pos);
+    vtkMath::MultiplyScalar(pos, -1.0);
+
+    vtkCamera* cam = this->GetActiveCamera();
+    cam->SetFocalPoint(0.0, 0.0, 0.0);
+    cam->SetPosition(pos);
+    cam->SetViewUp(this->UpVector);
+
+    // skybox orientation
+    double front[3];
+    vtkMath::Cross(this->RightVector, this->UpVector, front);
+    this->SkyboxActor->SetFloorPlane(this->UpVector[0], this->UpVector[1], this->UpVector[2], 0.0);
+    this->SkyboxActor->SetFloorRight(front[0], front[1], front[2]);
+
+    // environment orientation
+    this->SetEnvironmentUp(this->UpVector);
+    this->SetEnvironmentRight(this->RightVector);
+  }
+  else
+  {
+    F3DLog::Print(F3DLog::Severity::Warning, up + " is not a valid up direction");
   }
 }
 
 //----------------------------------------------------------------------------
-std::string vtkF3DRenderer::GenerateMetaDataDescription()
-{
-  return " Unavailable\n";
-}
-
-//----------------------------------------------------------------------------
-void vtkF3DRenderer::SetupRenderPasses()
+void vtkF3DRenderer::ConfigureRenderPasses()
 {
   // clean up previous pass
   vtkRenderPass* pass = this->GetPass();
@@ -230,7 +279,7 @@ void vtkF3DRenderer::SetupRenderPasses()
   newPass->SetUseDepthPeelingPass(this->UseDepthPeelingPass);
   newPass->SetUseBlurBackground(this->UseBlurBackground);
   newPass->SetCircleOfConfusionRadius(this->CircleOfConfusionRadius);
-  newPass->SetForceOpaqueBackground(this->HasHDRI);
+  newPass->SetForceOpaqueBackground(this->HDRISkyboxVisible);
 
   double bounds[6];
   this->ComputeVisiblePropBounds(bounds);
@@ -267,12 +316,19 @@ void vtkF3DRenderer::SetupRenderPasses()
 
 // complete SetBackgroundMode needs https://gitlab.kitware.com/vtk/vtk/-/merge_requests/7341
 #if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20210123)
-  vtkOSPRayRendererNode::SetBackgroundMode(
-    this->HasHDRI ? vtkOSPRayRendererNode::Environment : vtkOSPRayRendererNode::Backplate, this);
+  vtkOSPRayRendererNode::BackgroundMode mode = vtkOSPRayRendererNode::Backplate;
 #else
-  vtkOSPRayRendererNode::SetBackgroundMode(this->HasHDRI ? 2 : 1, this);
+  int mode = 1;
 #endif
-
+  if (this->GetUseImageBasedLighting())
+  {
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20210123)
+    mode = vtkOSPRayRendererNode::Both;
+#else
+    mode = 3;
+#endif
+  }
+  vtkOSPRayRendererNode::SetBackgroundMode(mode, this);
 #else
   if (this->UseRaytracing || this->UseRaytracingDenoiser)
   {
@@ -280,6 +336,7 @@ void vtkF3DRenderer::SetupRenderPasses()
       "Raytracing options can't be used if F3D has not been built with raytracing");
   }
 #endif
+  this->RenderPassesConfigured = true;
 }
 
 //----------------------------------------------------------------------------
@@ -323,6 +380,10 @@ std::string vtkF3DRenderer::GetSceneDescription()
 void vtkF3DRenderer::ShowAxis(bool show)
 {
   // Dynamic visible axis
+  // XXX this could be handled in UpdateActors
+  // but it is not needed as axis actor is not impacted by
+  // by any other parameters and require special
+  // care when destructing this renderer
   if (this->AxisVisible != show)
   {
     this->AxisWidget = nullptr;
@@ -352,17 +413,60 @@ void vtkF3DRenderer::ShowAxis(bool show)
     }
 
     this->AxisVisible = show;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
 //----------------------------------------------------------------------------
-void vtkF3DRenderer::ShowGrid(bool show, double unitSquare, int subdivisions)
+void vtkF3DRenderer::SetGridAbsolute(bool absolute)
 {
-  // Initialize grid using visible prop bounds
+  if (this->GridAbsolute != absolute)
+  {
+    this->GridAbsolute = absolute;
+    this->GridConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetGridUnitSquare(double unitSquare)
+{
+  if (this->GridUnitSquare != unitSquare)
+  {
+    this->GridUnitSquare = unitSquare;
+    this->GridConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetGridSubdivisions(int subdivisions)
+{
+  if (this->GridSubdivisions != subdivisions)
+  {
+    this->GridSubdivisions = subdivisions;
+    this->GridConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ShowGrid(bool show)
+{
+  if (this->GridVisible != show)
+  {
+    this->GridVisible = show;
+    this->RenderPassesConfigured = false;
+    this->GridConfigured = false;
+    this->CheatSheetConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureGridUsingCurrentActors()
+{
+  // Configure grid using visible prop bounds and actors
   // Also initialize GridInfo
-  if (!this->GridInitialized)
+  bool show = this->GridVisible;
+  if (show)
   {
     double bounds[6];
     this->ComputeVisiblePropBounds(bounds);
@@ -376,53 +480,58 @@ void vtkF3DRenderer::ShowGrid(bool show, double unitSquare, int subdivisions)
     else
     {
       double diag = bbox.GetDiagonalLength();
-      if (unitSquare <= 0)
+      double tmpUnitSquare = this->GridUnitSquare;
+      if (tmpUnitSquare <= 0)
       {
-        unitSquare = pow(10.0, round(log10(diag * 0.1)));
+        tmpUnitSquare = pow(10.0, round(log10(diag * 0.1)));
       }
 
-      double gridPos[3];
-      for (int i = 0; i < 3; i++)
+      double gridPos[3] = { 0, 0, 0 };
+      if (this->GridAbsolute)
       {
-        double size = bounds[2 * i + 1] - bounds[2 * i];
-        gridPos[i] = 0.5 * (bounds[2 * i] + bounds[2 * i + 1] - this->UpVector[i] * size);
+        for (int i = 0; i < 3; i++)
+        {
+          gridPos[i] = this->UpVector[i] ? 0 : 0.5 * (bounds[2 * i] + bounds[2 * i + 1]);
+        }
+      }
+      else
+      {
+        for (int i = 0; i < 3; i++)
+        {
+          // a small margin is added to the size to avoid z-fighting if large translucent
+          // triangles are exactly aligned with the grid bounds
+          constexpr double margin = 1.0001;
+          double size = margin * (bounds[2 * i + 1] - bounds[2 * i]);
+          gridPos[i] = 0.5 * (bounds[2 * i] + bounds[2 * i + 1] - this->UpVector[i] * size);
+        }
       }
 
       std::stringstream stream;
-      stream << "Using grid unit square size = " << unitSquare << "\n"
+      stream << "Using grid unit square size = " << tmpUnitSquare << "\n"
              << "Grid origin set to [" << gridPos[0] << ", " << gridPos[1] << ", " << gridPos[2]
              << "]\n\n";
       this->GridInfo = stream.str();
 
       vtkNew<vtkF3DOpenGLGridMapper> gridMapper;
       gridMapper->SetFadeDistance(diag);
-      gridMapper->SetUnitSquare(unitSquare);
-      gridMapper->SetSubdivisions(subdivisions);
+      gridMapper->SetUnitSquare(tmpUnitSquare);
+      gridMapper->SetSubdivisions(this->GridSubdivisions);
       gridMapper->SetUpIndex(this->UpIndex);
+      if (this->GridAbsolute)
+        gridMapper->SetOriginOffset(-gridPos[0], -gridPos[1], -gridPos[2]);
 
       this->GridActor->GetProperty()->SetColor(0.0, 0.0, 0.0);
       this->GridActor->ForceTranslucentOn();
       this->GridActor->SetPosition(gridPos);
       this->GridActor->SetMapper(gridMapper);
       this->GridActor->UseBoundsOff();
-      this->GridActor->SetVisibility(false);
-      this->SetClippingRangeExpansion(0);
-      this->GridInitialized = true;
-      this->GridVisible = false;
+      this->GridActor->PickableOff();
+      this->GridConfigured = true;
     }
   }
 
-  // Actual grid visibility code
-  if (this->GridVisible != show)
-  {
-    this->SetClippingRangeExpansion(show ? 0.99 : 0);
-    this->GridVisible = show;
-    this->GridActor->SetVisibility(show);
-    this->ResetCameraClippingRange();
-
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
-  }
+  this->GridActor->SetVisibility(show);
+  this->ResetCameraClippingRange();
 }
 
 //----------------------------------------------------------------------------
@@ -439,12 +548,131 @@ void vtkF3DRenderer::SetHDRIFile(const std::string& hdriFile)
   {
     this->HDRIFile = collapsedHdriFile;
 
-    // Read HDRI when needed
-    vtkNew<vtkTexture> hdriTexture;
-    this->HasHDRI = false;
+    this->TextActorsConfigured = false;
+    this->RenderPassesConfigured = false;
+
+    this->HasValidHDRIReader = false;
+    this->HasValidHDRIHash = false;
+    this->HasValidHDRITexture = false;
+    this->HasValidHDRISH = false;
+    this->HasValidHDRISpec = false;
+
+    this->HDRIReaderConfigured = false;
+    this->HDRIHashConfigured = false;
+    this->HDRITextureConfigured = false;
+    this->HDRISphericalHarmonicsConfigured = false;
+    this->HDRISpecularConfigured = false;
+    this->HDRISkyboxConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetUseImageBasedLighting(bool use)
+{
+  if (use != this->GetUseImageBasedLighting())
+  {
+    this->Superclass::SetUseImageBasedLighting(use);
+
+    this->HDRIReaderConfigured = false;
+    this->HDRIHashConfigured = false;
+    this->HDRITextureConfigured = false;
+    this->HDRILUTConfigured = false;
+    this->HDRISphericalHarmonicsConfigured = false;
+    this->HDRISpecularConfigured = false;
+
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetCachePath(const std::string& cachePath)
+{
+  if (this->CachePath != cachePath)
+  {
+    this->CachePath = cachePath;
+    this->TextActorsConfigured = false;
+    this->RenderPassesConfigured = false;
+
+    this->HasValidHDRILUT = false;
+    this->HasValidHDRISH = false;
+    this->HasValidHDRISpec = false;
+
+    this->HDRILUTConfigured = false;
+    this->HDRISphericalHarmonicsConfigured = false;
+    this->HDRISpecularConfigured = false;
+
+    if (this->HasValidHDRIHash)
+    {
+      this->CreateCacheDirectory();
+    }
+  }
+}
+
+//----------------------------------------------------------------------------
+bool vtkF3DRenderer::CheckForSHCache(std::string& path)
+{
+  assert(this->HasValidHDRIHash);
+  path = this->CachePath + "/" + this->HDRIHash + "/sh.vtt";
+  return vtksys::SystemTools::FileExists(path, true);
+}
+
+//----------------------------------------------------------------------------
+bool vtkF3DRenderer::CheckForSpecCache(std::string& path)
+{
+  assert(this->HasValidHDRIHash);
+  path = this->CachePath + "/" + this->HDRIHash + "/specular.vtm";
+  return vtksys::SystemTools::FileExists(path, true);
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRI()
+{
+  if (!this->HDRIReaderConfigured)
+  {
+    this->ConfigureHDRIReader();
+  }
+
+  if (!this->HDRIHashConfigured)
+  {
+    this->ConfigureHDRIHash();
+  }
+
+  if (!this->HDRITextureConfigured)
+  {
+    this->ConfigureHDRITexture();
+  }
+
+  if (!this->HDRILUTConfigured)
+  {
+    this->ConfigureHDRILUT();
+  }
+
+  if (!this->HDRISphericalHarmonicsConfigured)
+  {
+    this->ConfigureHDRISphericalHarmonics();
+  }
+
+  if (!this->HDRISpecularConfigured)
+  {
+    this->ConfigureHDRISpecular();
+  }
+
+  if (!this->HDRISkyboxConfigured)
+  {
+    this->ConfigureHDRISkybox();
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRIReader()
+{
+  if (!this->HasValidHDRIReader && (this->HDRISkyboxVisible || this->GetUseImageBasedLighting()))
+  {
+    this->UseDefaultHDRI = false;
+    this->HDRIReader = nullptr;
     if (!this->HDRIFile.empty())
     {
-      this->HDRIFile = vtksys::SystemTools::CollapseFullPath(this->HDRIFile);
       if (!vtksys::SystemTools::FileExists(this->HDRIFile, true))
       {
         F3DLog::Print(
@@ -452,253 +680,362 @@ void vtkF3DRenderer::SetHDRIFile(const std::string& hdriFile)
       }
       else
       {
-        auto reader = vtkSmartPointer<vtkImageReader2>::Take(
+        this->HDRIReader = vtkSmartPointer<vtkImageReader2>::Take(
           vtkImageReader2Factory::CreateImageReader2(this->HDRIFile.c_str()));
-        if (reader)
+        if (this->HDRIReader)
         {
-          reader->SetFileName(this->HDRIFile.c_str());
-          reader->Update();
-
-          hdriTexture->SetColorModeToDirectScalars();
-          hdriTexture->MipmapOn();
-          hdriTexture->InterpolateOn();
-          hdriTexture->SetInputConnection(reader->GetOutputPort());
-
-          // 8-bit textures are usually gamma-corrected
-          if (reader->GetOutput() && reader->GetOutput()->GetScalarType() == VTK_UNSIGNED_CHAR)
-          {
-            hdriTexture->UseSRGBColorSpaceOn();
-          }
-
-          this->HasHDRI = true;
+          this->HDRIReader->SetFileName(this->HDRIFile.c_str());
         }
         else
         {
-          F3DLog::Print(
-            F3DLog::Severity::Warning, std::string("Cannot open HDRI file ") + this->HDRIFile);
+          F3DLog::Print(F3DLog::Severity::Warning,
+            std::string("Cannot open HDRI file ") + this->HDRIFile +
+              std::string(". Using default HDRI"));
         }
       }
     }
 
-    // Dynamic HDRI
-    if (this->HasHDRI)
+    if (!this->HDRIReader)
     {
-#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
-      // Check LUT cache
-      std::string lutCachePath = this->CachePath + "/lut.vti";
-      bool lutCacheExists = vtksys::SystemTools::FileExists(lutCachePath, true);
-      if (lutCacheExists)
-      {
-        vtkF3DCachedLUTTexture* lut = vtkF3DCachedLUTTexture::New();
-        lut->SetFileName(lutCachePath.c_str());
-        this->EnvMapLookupTable = lut;
-      }
-
-      // Compute HDRI MD5
-      std::string hash = ::ComputeImageHash(hdriTexture->GetInput());
-
-      // Cache folder for this HDRI
-      std::string currentCachePath = this->CachePath + "/" + hash;
-
-      // Create the folder if it does not exists
-      vtksys::SystemTools::MakeDirectory(currentCachePath);
-
-      // Check spherical harmonics cache
-      std::string shCachePath = this->CachePath + "/" + hash + "/sh.vtt";
-      bool shCacheExists = vtksys::SystemTools::FileExists(shCachePath, true);
-      if (shCacheExists)
-      {
-        vtkNew<vtkXMLTableReader> reader;
-        reader->SetFileName(shCachePath.c_str());
-        reader->Update();
-
-        this->SphericalHarmonics = vtkFloatArray::SafeDownCast(reader->GetOutput()->GetColumn(0));
-      }
-
-      // Check specular cache
-      std::string specCachePath = this->CachePath + "/" + hash + "/specular.vtm";
-      bool specCacheExists = vtksys::SystemTools::FileExists(specCachePath, true);
-      if (specCacheExists)
-      {
-        vtkF3DCachedSpecularTexture* spec = vtkF3DCachedSpecularTexture::New();
-        spec->SetFileName(specCachePath.c_str());
-        this->EnvMapPrefiltered = spec;
-      }
-
-      this->GetEnvMapPrefiltered()->HalfPrecisionOff();
-#endif
-
-      // HDRI OpenGL
-      this->UseImageBasedLightingOn();
-      this->SetEnvironmentTexture(hdriTexture);
-
-      // Skybox OpenGL
-      this->Skybox->SetProjection(vtkSkybox::Sphere);
-      this->Skybox->SetTexture(hdriTexture);
-
-      // First version of VTK including the version check (and the feature used)
-#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20200527)
-      this->Skybox->GammaCorrectOn();
-#endif
-
-      // skybox orientation
-      double front[3];
-      vtkMath::Cross(this->RightVector, this->UpVector, front);
-      this->Skybox->SetFloorPlane(this->UpVector[0], this->UpVector[1], this->UpVector[2], 0.0);
-      this->Skybox->SetFloorRight(front[0], front[1], front[2]);
-
-      this->AddActor(this->Skybox);
-
-      // build HDRI textures and spherical harmonics
-      this->Render();
-
-#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
-      // Create LUT cache file
-      if (!lutCacheExists)
-      {
-        vtkPBRLUTTexture* lut = this->GetEnvMapLookupTable();
-
-        vtkSmartPointer<vtkImageData> img = ::SaveTextureToImage(
-          lut->GetTextureObject(), GL_TEXTURE_2D, 0, lut->GetLUTSize(), VTK_UNSIGNED_SHORT);
-
-        if (img)
-        {
-          vtkNew<vtkXMLImageDataWriter> writer;
-          writer->SetFileName(lutCachePath.c_str());
-          writer->SetInputData(img);
-          writer->Write();
-        }
-      }
-
-      // Create spherical harmonics cache file
-      if (!shCacheExists)
-      {
-        vtkNew<vtkTable> table;
-        table->AddColumn(this->SphericalHarmonics);
-
-        vtkNew<vtkXMLTableWriter> writer;
-        writer->SetInputData(table);
-        writer->SetFileName(shCachePath.c_str());
-        writer->Write();
-      }
-
-      // Create specular cache file
-      if (!specCacheExists)
-      {
-        vtkPBRPrefilterTexture* spec = this->GetEnvMapPrefiltered();
-
-        unsigned int nbLevels = spec->GetPrefilterLevels();
-        unsigned int size = spec->GetPrefilterSize();
-
-        vtkNew<vtkMultiBlockDataSet> mb;
-        mb->SetNumberOfBlocks(6 * nbLevels);
-
-        for (unsigned int i = 0; i < nbLevels; i++)
-        {
-          vtkSmartPointer<vtkImageData> img = ::SaveTextureToImage(
-            spec->GetTextureObject(), GL_TEXTURE_CUBE_MAP_POSITIVE_X, i, size >> i, VTK_FLOAT);
-
-          mb->SetBlock(i, img);
-        }
-
-        vtkNew<vtkXMLMultiBlockDataWriter> writer;
-        writer->SetFileName(specCachePath.c_str());
-        writer->SetInputData(mb);
-        writer->Write();
-      }
-#endif
+      // No valid HDRI file have been provided, read the default HDRI
+      // TODO add support for memory buffer in the vtkHDRReader in VTK
+      // https://github.com/f3d-app/f3d/issues/935
+      this->HDRIReader = vtkSmartPointer<vtkPNGReader>::New();
+      this->HDRIReader->SetMemoryBuffer(F3DDefaultHDRI);
+      this->HDRIReader->SetMemoryBufferLength(sizeof(F3DDefaultHDRI));
+      this->UseDefaultHDRI = true;
     }
-    else
-    {
-      this->UseImageBasedLightingOff();
-      this->SetEnvironmentTexture(nullptr);
-      this->RemoveActor(this->Skybox);
-    }
-    this->UpdateTextColor();
+    this->HasValidHDRIReader = true;
   }
-  this->SetupRenderPasses();
+  this->HDRIReaderConfigured = true;
 }
 
 //----------------------------------------------------------------------------
-void vtkF3DRenderer::UpdateTextColor()
+void vtkF3DRenderer::ConfigureHDRIHash()
+{
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+  if (!this->HasValidHDRIHash && this->GetUseImageBasedLighting() && this->HasValidHDRIReader)
+  {
+    if (this->UseDefaultHDRI)
+    {
+      this->HDRIHash = "default";
+    }
+    else
+    {
+      // Compute HDRI MD5
+      this->HDRIHash = ::ComputeFileHash(this->HDRIFile);
+    }
+    this->HasValidHDRIHash = true;
+    this->CreateCacheDirectory();
+  }
+#endif
+  this->HDRIHashConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRITexture()
+{
+  if (!this->HasValidHDRITexture)
+  {
+    bool needHDRITexture = this->HDRISkyboxVisible || this->GetUseImageBasedLighting();
+
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+    if (this->HasValidHDRIHash)
+    {
+      std::string dummy;
+      needHDRITexture = this->HDRISkyboxVisible ||
+        (this->GetUseImageBasedLighting() &&
+          (!this->CheckForSHCache(dummy) || !this->CheckForSpecCache(dummy) ||
+            this->UseRaytracing));
+    }
+#endif
+
+    if (needHDRITexture)
+    {
+      assert(this->HasValidHDRIReader);
+      this->HDRIReader->Update();
+
+      this->HDRITexture = vtkSmartPointer<vtkTexture>::New();
+      this->HDRITexture->SetColorModeToDirectScalars();
+      this->HDRITexture->MipmapOn();
+      this->HDRITexture->InterpolateOn();
+      this->HDRITexture->SetInputConnection(this->HDRIReader->GetOutputPort());
+
+      // 8-bit textures are usually gamma-corrected
+      if (this->HDRIReader->GetOutput() &&
+        this->HDRIReader->GetOutput()->GetScalarType() == VTK_UNSIGNED_CHAR)
+      {
+        this->HDRITexture->UseSRGBColorSpaceOn();
+      }
+      this->HasValidHDRITexture = true;
+    }
+    else
+    {
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 3, 20230902)
+      // IBL without textures has been added in VTK in
+      // https://gitlab.kitware.com/vtk/vtk/-/merge_requests/10454
+      this->HDRITexture = nullptr;
+#else
+      vtkNew<vtkImageData> img;
+      this->HDRITexture = vtkSmartPointer<vtkTexture>::New();
+      this->HDRITexture->SetInputData(img);
+#endif
+      this->HasValidHDRITexture = false;
+    }
+  }
+
+  if (this->GetUseImageBasedLighting())
+  {
+    this->SetEnvironmentTexture(this->HDRITexture);
+
+    // No cache support before 20221220
+    // IBL without textures has been added in VTK in
+    // https://gitlab.kitware.com/vtk/vtk/-/merge_requests/10454
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220) &&                                     \
+  VTK_VERSION_NUMBER < VTK_VERSION_CHECK(9, 3, 20230902)
+    if (this->SphericalHarmonics)
+    {
+      this->SphericalHarmonics->Modified();
+    }
+#endif
+  }
+  else
+  {
+    this->SetEnvironmentTexture(nullptr);
+  }
+
+  this->HDRITextureConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRILUT()
+{
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+  if (this->GetUseImageBasedLighting() && !this->HasValidHDRILUT)
+  {
+    vtkF3DCachedLUTTexture* lut = vtkF3DCachedLUTTexture::SafeDownCast(this->EnvMapLookupTable);
+    assert(lut);
+
+    // Check LUT cache
+    std::string lutCachePath = this->CachePath + "/lut.vti";
+    bool lutCacheExists = vtksys::SystemTools::FileExists(lutCachePath, true);
+    if (lutCacheExists)
+    {
+      lut->SetFileName(lutCachePath.c_str());
+      lut->UseCacheOn();
+    }
+    else
+    {
+      if (!lut->GetTextureObject() || !this->HasValidHDRILUT)
+      {
+        lut->UseCacheOff();
+        lut->Load(this);
+        lut->PostRender(this);
+      }
+      assert(lut->GetTextureObject());
+
+      vtkSmartPointer<vtkImageData> img = ::SaveTextureToImage(
+        lut->GetTextureObject(), GL_TEXTURE_2D, 0, lut->GetLUTSize(), VTK_UNSIGNED_SHORT);
+      assert(img);
+
+      vtkNew<vtkXMLImageDataWriter> writer;
+      writer->SetFileName(lutCachePath.c_str());
+      writer->SetInputData(img);
+      writer->Write();
+    }
+    this->HasValidHDRILUT = true;
+  }
+#endif
+  this->HDRILUTConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRISphericalHarmonics()
+{
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+  if (this->GetUseImageBasedLighting() && !this->HasValidHDRISH)
+  {
+    // Check spherical harmonics cache
+    std::string shCachePath;
+    if (this->CheckForSHCache(shCachePath))
+    {
+      vtkNew<vtkXMLTableReader> reader;
+      reader->SetFileName(shCachePath.c_str());
+      reader->Update();
+
+      this->SphericalHarmonics = vtkFloatArray::SafeDownCast(reader->GetOutput()->GetColumn(0));
+    }
+    else
+    {
+      if (!this->SphericalHarmonics ||
+        this->HDRITexture->GetInput()->GetMTime() > this->SphericalHarmonics->GetMTime() ||
+        !this->HasValidHDRISH)
+      {
+        vtkNew<vtkSphericalHarmonics> sh;
+        sh->SetInputData(this->HDRITexture->GetInput());
+        sh->Update();
+        this->SphericalHarmonics = vtkFloatArray::SafeDownCast(
+          vtkTable::SafeDownCast(sh->GetOutputDataObject(0))->GetColumn(0));
+      }
+
+      // Create spherical harmonics cache file
+      vtkNew<vtkTable> table;
+      table->AddColumn(this->SphericalHarmonics);
+
+      vtkNew<vtkXMLTableWriter> writer;
+      writer->SetInputData(table);
+      writer->SetFileName(shCachePath.c_str());
+      writer->Write();
+    }
+    this->HasValidHDRISH = true;
+  }
+#endif
+  this->HDRISphericalHarmonicsConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRISpecular()
+{
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20221220)
+  if (this->GetUseImageBasedLighting() && !this->HasValidHDRISpec)
+  {
+    vtkF3DCachedSpecularTexture* spec =
+      vtkF3DCachedSpecularTexture::SafeDownCast(this->EnvMapPrefiltered);
+    assert(spec);
+
+    // Check specular cache
+    std::string specCachePath;
+    if (this->CheckForSpecCache(specCachePath))
+    {
+      spec->SetFileName(specCachePath.c_str());
+      spec->UseCacheOn();
+    }
+    else
+    {
+      if (!spec->GetTextureObject() || !this->HasValidHDRISpec)
+      {
+        spec->UseCacheOff();
+        spec->Load(this);
+        spec->PostRender(this);
+      }
+      assert(spec->GetTextureObject());
+
+      unsigned int nbLevels = spec->GetPrefilterLevels();
+      unsigned int size = spec->GetPrefilterSize();
+
+      vtkNew<vtkMultiBlockDataSet> mb;
+      mb->SetNumberOfBlocks(nbLevels);
+
+      for (unsigned int i = 0; i < nbLevels; i++)
+      {
+        vtkSmartPointer<vtkImageData> img = ::SaveTextureToImage(
+          spec->GetTextureObject(), GL_TEXTURE_CUBE_MAP_POSITIVE_X, i, size >> i, VTK_FLOAT);
+        assert(img);
+        mb->SetBlock(i, img);
+      }
+
+      vtkNew<vtkXMLMultiBlockDataWriter> writer;
+      writer->SetCompressorTypeToNone();
+      writer->SetDataModeToAppended();
+      writer->EncodeAppendedDataOff();
+      writer->SetHeaderTypeToUInt64();
+      writer->SetFileName(specCachePath.c_str());
+      writer->SetInputData(mb);
+      writer->Write();
+    }
+    this->HasValidHDRISpec = true;
+  }
+#endif
+
+  this->HDRISpecularConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureHDRISkybox()
+{
+  this->SkyboxActor->SetTexture(this->HDRITexture);
+  this->SkyboxActor->SetVisibility(this->HDRISkyboxVisible);
+  this->HDRISkyboxConfigured = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureTextActors()
 {
   // Dynamic text color
   double textColor[3];
   if (this->IsBackgroundDark())
   {
-    textColor[0] = textColor[1] = textColor[2] = 1.0;
+    textColor[0] = textColor[1] = textColor[2] = 0.9;
   }
   else
   {
-    textColor[0] = textColor[1] = textColor[2] = 0.0;
+    textColor[0] = textColor[1] = textColor[2] = 0.2;
   }
   this->FilenameActor->GetTextProperty()->SetColor(textColor);
   this->MetaDataActor->GetTextProperty()->SetColor(textColor);
   this->TimerActor->GetTextProperty()->SetColor(textColor);
-  this->CheatSheetActor->GetTextProperty()->SetColor(textColor);
+  this->CheatSheetActor->GetTextProperty()->SetColor(0.8, 0.8, 0.8);
+  this->DropZoneActor->GetTextProperty()->SetColor(textColor);
+
+  // Font
+  this->FilenameActor->GetTextProperty()->SetFontFamilyToCourier();
+  this->MetaDataActor->GetTextProperty()->SetFontFamilyToCourier();
+  this->TimerActor->GetTextProperty()->SetFontFamilyToCourier();
+  this->CheatSheetActor->GetTextProperty()->SetFontFamilyToCourier();
+  this->DropZoneActor->GetTextProperty()->SetFontFamilyToCourier();
+  if (!this->FontFile.empty())
+  {
+    std::string tmpFontFile = vtksys::SystemTools::CollapseFullPath(this->FontFile);
+    if (vtksys::SystemTools::FileExists(tmpFontFile, true))
+    {
+      this->FilenameActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
+      this->FilenameActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
+      this->MetaDataActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
+      this->MetaDataActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
+      this->TimerActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
+      this->TimerActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
+      this->CheatSheetActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
+      this->CheatSheetActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
+      this->DropZoneActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
+      this->DropZoneActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
+    }
+    else
+    {
+      F3DLog::Print(
+        F3DLog::Severity::Warning, std::string("Cannot find \"") + tmpFontFile + "\" font file.");
+    }
+  }
+
+  this->TextActorsConfigured = true;
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::SetLineWidth(double lineWidth)
 {
-  vtkActor* anActor;
-  vtkActorCollection* ac = this->GetActors();
-  vtkCollectionSimpleIterator ait;
-  for (ac->InitTraversal(ait); (anActor = ac->GetNextActor(ait));)
+  if (this->LineWidth != lineWidth)
   {
-    if (vtkSkybox::SafeDownCast(anActor) == nullptr)
-    {
-      anActor->GetProperty()->SetLineWidth(lineWidth);
-    }
+    this->LineWidth = lineWidth;
+    this->ActorsPropertiesConfigured = false;
   }
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::SetPointSize(double pointSize)
 {
-  vtkActor* anActor;
-  vtkActorCollection* ac = this->GetActors();
-  vtkCollectionSimpleIterator ait;
-  for (ac->InitTraversal(ait); (anActor = ac->GetNextActor(ait));)
+  if (this->PointSize != pointSize)
   {
-    if (vtkSkybox::SafeDownCast(anActor) == nullptr)
-    {
-      anActor->GetProperty()->SetPointSize(pointSize);
-    }
+    this->PointSize = pointSize;
+    this->ActorsPropertiesConfigured = false;
   }
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::SetFontFile(const std::string& fontFile)
 {
-  // Dynamic font management
   if (this->FontFile != fontFile)
   {
     this->FontFile = fontFile;
-    this->FilenameActor->GetTextProperty()->SetFontFamilyToCourier();
-    this->MetaDataActor->GetTextProperty()->SetFontFamilyToCourier();
-    this->TimerActor->GetTextProperty()->SetFontFamilyToCourier();
-    this->CheatSheetActor->GetTextProperty()->SetFontFamilyToCourier();
-    if (!fontFile.empty())
-    {
-      std::string tmpFontFile = vtksys::SystemTools::CollapseFullPath(fontFile);
-      if (vtksys::SystemTools::FileExists(tmpFontFile, true))
-      {
-        this->FilenameActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
-        this->FilenameActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
-        this->MetaDataActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
-        this->MetaDataActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
-        this->TimerActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
-        this->TimerActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
-        this->CheatSheetActor->GetTextProperty()->SetFontFamily(VTK_FONT_FILE);
-        this->CheatSheetActor->GetTextProperty()->SetFontFile(tmpFontFile.c_str());
-      }
-      else
-      {
-        F3DLog::Print(
-          F3DLog::Severity::Warning, std::string("Cannot find \"") + tmpFontFile + "\" font file.");
-      }
-    }
+    this->TextActorsConfigured = false;
   }
 }
 
@@ -706,32 +1043,31 @@ void vtkF3DRenderer::SetFontFile(const std::string& fontFile)
 void vtkF3DRenderer::SetBackground(const double* color)
 {
   this->Superclass::SetBackground(color);
-  this->UpdateTextColor();
+  this->TextActorsConfigured = false;
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::SetLightIntensity(const double intensityFactor)
 {
-  vtkLightCollection* lc = this->GetLights();
-  vtkLight* light;
-  vtkCollectionSimpleIterator it;
-  for (lc->InitTraversal(it); (light = lc->GetNextLight(it));)
+  if (this->LightIntensity != intensityFactor)
   {
-    double originalIntensity;
-    if (this->OriginalLightIntensities.count(light))
-    {
-      originalIntensity = this->OriginalLightIntensities[light];
-    }
-    else
-    {
-      originalIntensity = light->GetIntensity();
-      this->OriginalLightIntensities[light] = originalIntensity;
-    }
-
-    light->SetIntensity(originalIntensity * intensityFactor);
+    this->LightIntensity = intensityFactor;
+    this->LightIntensitiesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
-  this->LightIntensity = intensityFactor;
-  this->CheatSheetNeedUpdate = true;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetFilenameInfo(const std::string& info)
+{
+  this->FilenameActor->SetText(vtkCornerAnnotation::UpperEdge, info.c_str());
+  this->RenderPassesConfigured = false;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::SetDropZoneInfo(const std::string& info)
+{
+  this->DropZoneActor->SetDropText(info);
 }
 
 //----------------------------------------------------------------------------
@@ -740,8 +1076,8 @@ void vtkF3DRenderer::SetUseDepthPeelingPass(bool use)
   if (this->UseDepthPeelingPass != use)
   {
     this->UseDepthPeelingPass = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -751,8 +1087,8 @@ void vtkF3DRenderer::SetUseBlurBackground(bool use)
   if (this->UseBlurBackground != use)
   {
     this->UseBlurBackground = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 //----------------------------------------------------------------------------
@@ -761,7 +1097,7 @@ void vtkF3DRenderer::SetBlurCircleOfConfusionRadius(double radius)
   if (this->CircleOfConfusionRadius != radius)
   {
     this->CircleOfConfusionRadius = radius;
-    this->SetupRenderPasses();
+    this->RenderPassesConfigured = false;
   }
 }
 
@@ -771,8 +1107,8 @@ void vtkF3DRenderer::SetUseSSAOPass(bool use)
   if (this->UseSSAOPass != use)
   {
     this->UseSSAOPass = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -782,8 +1118,8 @@ void vtkF3DRenderer::SetUseFXAAPass(bool use)
   if (this->UseFXAAPass != use)
   {
     this->UseFXAAPass = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -793,8 +1129,8 @@ void vtkF3DRenderer::SetUseToneMappingPass(bool use)
   if (this->UseToneMappingPass != use)
   {
     this->UseToneMappingPass = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -804,8 +1140,8 @@ void vtkF3DRenderer::SetUseRaytracing(bool use)
   if (this->UseRaytracing != use)
   {
     this->UseRaytracing = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -815,7 +1151,7 @@ void vtkF3DRenderer::SetRaytracingSamples(int samples)
   if (this->RaytracingSamples != samples)
   {
     this->RaytracingSamples = samples;
-    this->SetupRenderPasses();
+    this->RenderPassesConfigured = false;
   }
 }
 
@@ -825,8 +1161,8 @@ void vtkF3DRenderer::SetUseRaytracingDenoiser(bool use)
   if (this->UseRaytracingDenoiser != use)
   {
     this->UseRaytracingDenoiser = use;
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -837,8 +1173,8 @@ void vtkF3DRenderer::ShowTimer(bool show)
   {
     this->TimerVisible = show;
     this->TimerActor->SetVisibility(show);
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -849,8 +1185,8 @@ void vtkF3DRenderer::ShowFilename(bool show)
   {
     this->FilenameVisible = show;
     this->FilenameActor->SetVisibility(show);
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -860,17 +1196,22 @@ void vtkF3DRenderer::ShowMetaData(bool show)
   if (this->MetaDataVisible != show)
   {
     this->MetaDataVisible = show;
-    this->MetaDataActor->SetVisibility(show);
-    if (show)
-    {
-      // Update metadata info
-      std::string MetaDataDesc = this->GenerateMetaDataDescription();
-      this->MetaDataActor->SetText(vtkCornerAnnotation::RightEdge, MetaDataDesc.c_str());
-    }
-
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->MetaDataConfigured = false;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureMetaData()
+{
+  this->MetaDataActor->SetVisibility(this->MetaDataVisible);
+  if (this->MetaDataVisible)
+  {
+    this->MetaDataActor->SetText(
+      vtkCornerAnnotation::RightEdge, this->GenerateMetaDataDescription().c_str());
+  }
+  this->MetaDataConfigured = true;
 }
 
 //----------------------------------------------------------------------------
@@ -880,13 +1221,13 @@ void vtkF3DRenderer::ShowCheatSheet(bool show)
   {
     this->CheatSheetVisible = show;
     this->CheatSheetActor->SetVisibility(show);
-    this->SetupRenderPasses();
-    this->CheatSheetNeedUpdate = true;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
 //----------------------------------------------------------------------------
-void vtkF3DRenderer::UpdateCheatSheet()
+void vtkF3DRenderer::ConfigureCheatSheet()
 {
   if (this->CheatSheetVisible)
   {
@@ -896,23 +1237,56 @@ void vtkF3DRenderer::UpdateCheatSheet()
     cheatSheetText << "\n   H  : Cheat sheet \n";
     cheatSheetText << "   ?  : Print scene descr to terminal\n";
     cheatSheetText << "  ESC : Quit \n";
-    cheatSheetText << " ENTER: Reset camera to initial parameters\n";
     cheatSheetText << " SPACE: Play animation if any\n";
     cheatSheetText << " LEFT : Previous file \n";
     cheatSheetText << " RIGHT: Next file \n";
     cheatSheetText << "  UP  : Reload current file \n";
+    cheatSheetText << " DOWN : Add files from dir of current file\n";
+    cheatSheetText << "\n 1: Front View camera\n";
+    cheatSheetText << " 3: Right View camera\n";
+    cheatSheetText << " 7: Top View camera\n";
+    cheatSheetText << " 9: Isometric View camera\n";
+    cheatSheetText << " ENTER: Reset camera to initial parameters\n";
+    cheatSheetText << " Drop  : Load dropped file, folder or HDRI\n";
 
     this->CheatSheetActor->SetText(vtkCornerAnnotation::LeftEdge, cheatSheetText.str().c_str());
     this->CheatSheetActor->RenderOpaqueGeometry(this);
+    this->CheatSheetConfigured = true;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ShowDropZone(bool show)
+{
+  if (this->DropZoneVisible != show)
+  {
+    this->DropZoneVisible = show;
+    this->DropZoneActor->SetVisibility(show);
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ShowHDRISkybox(bool show)
+{
+  if (this->HDRISkyboxVisible != show)
+  {
+    this->HDRISkyboxVisible = show;
+
+    this->HDRIReaderConfigured = false;
+    this->HDRITextureConfigured = false;
+    this->HDRISkyboxConfigured = false;
+    this->RenderPassesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::FillCheatSheetHotkeys(std::stringstream& cheatSheetText)
 {
-  cheatSheetText << " P: Depth peeling " << (this->UseDepthPeelingPass ? "[ON]" : "[OFF]") << "\n";
-  cheatSheetText << " Q: SSAO " << (this->UseSSAOPass ? "[ON]" : "[OFF]") << "\n";
-  cheatSheetText << " A: FXAA " << (this->UseFXAAPass ? "[ON]" : "[OFF]") << "\n";
+  cheatSheetText << " P: Translucency support " << (this->UseDepthPeelingPass ? "[ON]" : "[OFF]")
+                 << "\n";
+  cheatSheetText << " Q: Ambient occlusion " << (this->UseSSAOPass ? "[ON]" : "[OFF]") << "\n";
+  cheatSheetText << " A: Anti-aliasing " << (this->UseFXAAPass ? "[ON]" : "[OFF]") << "\n";
   cheatSheetText << " T: Tone mapping " << (this->UseToneMappingPass ? "[ON]" : "[OFF]") << "\n";
   cheatSheetText << " E: Edge visibility " << (this->EdgeVisible ? "[ON]" : "[OFF]") << "\n";
   cheatSheetText << " X: Axis " << (this->AxisVisible ? "[ON]" : "[OFF]") << "\n";
@@ -926,10 +1300,31 @@ void vtkF3DRenderer::FillCheatSheetHotkeys(std::stringstream& cheatSheetText)
 #endif
   cheatSheetText << " U: Blur background " << (this->UseBlurBackground ? "[ON]" : "[OFF]") << "\n";
   cheatSheetText << " K: Trackball interaction " << (this->UseTrackball ? "[ON]" : "[OFF]") << "\n";
+  cheatSheetText << " F: HDRI ambient lighting "
+                 << (this->GetUseImageBasedLighting() ? "[ON]" : "[OFF]") << "\n";
+  cheatSheetText << " J: HDRI skybox " << (this->HDRISkyboxVisible ? "[ON]" : "[OFF]") << "\n";
   cheatSheetText.precision(2);
   cheatSheetText << std::fixed;
   cheatSheetText << " L: Light (increase, shift+L: decrease) [" << this->LightIntensity << "]"
                  << " \n";
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::ConfigureActorsProperties()
+{
+  vtkActor* anActor;
+  vtkActorCollection* ac = this->GetActors();
+  vtkCollectionSimpleIterator ait;
+  for (ac->InitTraversal(ait); (anActor = ac->GetNextActor(ait));)
+  {
+    if (vtkSkybox::SafeDownCast(anActor) == nullptr)
+    {
+      anActor->GetProperty()->SetEdgeVisibility(this->EdgeVisible);
+      anActor->GetProperty()->SetLineWidth(this->LineWidth);
+      anActor->GetProperty()->SetPointSize(this->PointSize);
+    }
+  }
+  this->ActorsPropertiesConfigured = true;
 }
 
 //----------------------------------------------------------------------------
@@ -938,20 +1333,8 @@ void vtkF3DRenderer::ShowEdge(bool show)
   if (this->EdgeVisible != show)
   {
     this->EdgeVisible = show;
-
-    // Dynamic edges
-    vtkActor* anActor;
-    vtkActorCollection* ac = this->GetActors();
-    vtkCollectionSimpleIterator ait;
-    for (ac->InitTraversal(ait); (anActor = ac->GetNextActor(ait));)
-    {
-      if (vtkSkybox::SafeDownCast(anActor) == nullptr)
-      {
-        anActor->GetProperty()->SetEdgeVisibility(show);
-      }
-    }
-
-    this->CheatSheetNeedUpdate = true;
+    this->ActorsPropertiesConfigured = false;
+    this->CheatSheetConfigured = false;
   }
 }
 
@@ -961,17 +1344,47 @@ void vtkF3DRenderer::SetUseTrackball(bool use)
   if (this->UseTrackball != use)
   {
     this->UseTrackball = use;
-    this->CheatSheetNeedUpdate = true;
+    this->CheatSheetConfigured = false;
+  }
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::UpdateActors()
+{
+  this->ConfigureHDRI();
+
+  if (!this->MetaDataConfigured)
+  {
+    this->ConfigureMetaData();
+  }
+
+  if (!this->TextActorsConfigured)
+  {
+    this->ConfigureTextActors();
+  }
+
+  if (!this->RenderPassesConfigured)
+  {
+    this->ConfigureRenderPasses();
+  }
+
+  if (!this->GridConfigured)
+  {
+    this->ConfigureGridUsingCurrentActors();
   }
 }
 
 //----------------------------------------------------------------------------
 void vtkF3DRenderer::Render()
 {
-  if (this->CheatSheetNeedUpdate)
+  if (!this->ActorsPropertiesConfigured)
   {
-    this->UpdateCheatSheet();
-    this->CheatSheetNeedUpdate = false;
+    this->ConfigureActorsProperties();
+  }
+
+  if (!this->CheatSheetConfigured)
+  {
+    this->ConfigureCheatSheet();
   }
 
   if (!this->TimerVisible)
@@ -1015,15 +1428,62 @@ void vtkF3DRenderer::Render()
 }
 
 //----------------------------------------------------------------------------
+void vtkF3DRenderer::ResetCameraClippingRange()
+{
+  const bool gridUseBounds = this->GridActor->GetUseBounds();
+  this->GridActor->UseBoundsOn();
+  this->Superclass::ResetCameraClippingRange();
+  this->GridActor->SetUseBounds(gridUseBounds);
+}
+
+//----------------------------------------------------------------------------
 int vtkF3DRenderer::UpdateLights()
 {
-  int lightCount = this->Superclass::UpdateLights();
-  if (lightCount == 0 && !this->UseImageBasedLighting)
+  // Recover the number of lights that are on
+  vtkLightCollection* lc = this->GetLights();
+  vtkLight* light;
+  int lightCount = 0;
+  vtkCollectionSimpleIterator it;
+  for (lc->InitTraversal(it); (light = lc->GetNextLight(it));)
+  {
+    if (light->GetSwitch())
+    {
+      lightCount++;
+    }
+  }
+
+  // If no lights are turned on, add a light kit, even when using a HDRI
+  if (lightCount == 0)
   {
     vtkNew<vtkLightKit> lightKit;
     lightKit->AddLightsToRenderer(this);
-    return this->GetLights()->GetNumberOfItems();
+    this->LightIntensitiesConfigured = false;
   }
+
+  // Update light shaders
+  lightCount = this->Superclass::UpdateLights();
+
+  if (!this->LightIntensitiesConfigured)
+  {
+    lc = this->GetLights();
+    for (lc->InitTraversal(it); (light = lc->GetNextLight(it));)
+    {
+      double originalIntensity;
+      if (this->OriginalLightIntensities.count(light))
+      {
+        originalIntensity = this->OriginalLightIntensities[light];
+      }
+      else
+      {
+        originalIntensity = light->GetIntensity();
+        this->OriginalLightIntensities[light] = originalIntensity;
+      }
+
+      light->SetIntensity(originalIntensity * this->LightIntensity);
+    }
+    this->LightIntensitiesConfigured = true;
+  }
+
   return lightCount;
 }
 
@@ -1032,5 +1492,17 @@ bool vtkF3DRenderer::IsBackgroundDark()
 {
   double luminance =
     0.299 * this->Background[0] + 0.587 * this->Background[1] + 0.114 * this->Background[2];
-  return this->HasHDRI ? true : luminance < 0.5;
+  return this->HDRISkyboxVisible ? true : luminance < 0.5;
+}
+
+//----------------------------------------------------------------------------
+void vtkF3DRenderer::CreateCacheDirectory()
+{
+  assert(this->HasValidHDRIHash);
+
+  // Cache folder for this HDRI
+  std::string currentCachePath = this->CachePath + "/" + this->HDRIHash;
+
+  // Create the folder if it does not exists
+  vtksys::SystemTools::MakeDirectory(currentCachePath);
 }

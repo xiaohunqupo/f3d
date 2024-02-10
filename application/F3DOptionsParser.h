@@ -21,6 +21,8 @@ struct F3DAppOptions
 {
   std::string UserConfigFile = "";
   bool DryRun = false;
+  bool GeometryOnly = false;
+  bool GroupGeometries = false;
   std::string Output = "";
   std::string Reference = "";
   std::string InteractionTestRecordFile = "";
@@ -32,13 +34,14 @@ struct F3DAppOptions
 
   std::vector<int> Resolution{ 1000, 600 };
   std::vector<int> Position{ 0 };
-  bool Quiet = false;
-  bool Verbose = false;
+  std::string VerboseLevel = "info";
   double CameraAzimuthAngle = 0.0;
   double CameraElevationAngle = 0.0;
   std::vector<double> CameraFocalPoint = { 0 };
   std::vector<double> CameraPosition = { 0 };
   std::vector<double> CameraViewUp = { 0 };
+  std::vector<double> CameraDirection = { 0 };
+  double CameraZoomFactor = 0.0;
   double CameraViewAngle = 0.0;
   std::vector<std::string> Plugins;
 };
@@ -86,10 +89,10 @@ public:
   F3DOptionsParser();
   ~F3DOptionsParser();
 
-private:
   F3DOptionsParser(F3DOptionsParser const&) = delete;
   void operator=(F3DOptionsParser const&) = delete;
 
+private:
   std::unique_ptr<ConfigurationOptions> ConfigOptions;
 };
 

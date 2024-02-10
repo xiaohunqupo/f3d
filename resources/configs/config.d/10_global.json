@@ -5,8 +5,11 @@
     "tone-mapping": true,
     "grid": true,
     "progress": true,
-    "fxaa": true,
+    "anti-aliasing": true,
     "filename": true,
-    "scalars": ""
+    "scalars": "",
+    "camera-direction": "-1,-0.5,-1",
+    "hdri-ambient": true,
+    "translucency-support": true
   }
 }

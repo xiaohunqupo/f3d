@@ -21,6 +21,7 @@ macro(f3d_plugin_init)
   set(F3D_PLUGIN_INCLUDES_CODE "")
   set(F3D_PLUGIN_REGISTER_CODE "")
   set(F3D_PLUGIN_MIMETYPES "")
+  set(F3D_PLUGIN_MIMETYPES_THUMB "")
   set(F3D_PLUGIN_CURRENT_READER_INDEX 0)
   set(F3D_PLUGIN_JSON "{ \"readers\": [] }")
 endmacro()
@@ -35,6 +36,7 @@ f3d_plugin_declare_reader(
   [VTK_READER            <class>]
   [FORMAT_DESCRIPTION    <string>]
   [SCORE                 <integer>]
+  [EXCLUDE_FROM_THUMBNAILER]
   [CUSTOM_CODE           <file>]
   EXTENSIONS             <string>...
   MIMETYPES              <string>...)
@@ -49,6 +51,7 @@ The `NAME` argument is required. The arguments are as follows:
   * `VTK_READER`: The VTK reader class to use.
   * `FORMAT_DESCRIPTION`: The description of the format read by the reader.
   * `SCORE`: The score of the reader (from 0 to 100). Default value is 50.
+  * `EXCLUDE_FROM_THUMBNAILER`: If specified, the reader will not be used for generating thumbnails.
   * `CUSTOM_CODE`: A custom code file containing the implementation of ``applyCustomReader`` function.
   * `EXTENSIONS`: (Required) The list of file extensions supported by the reader.
   * `MIMETYPES`: (Required) The list of mimetypes supported by the reader.
@@ -56,7 +59,7 @@ The `NAME` argument is required. The arguments are as follows:
 #]==]
 
 macro(f3d_plugin_declare_reader)
-  cmake_parse_arguments(F3D_READER "" "NAME;VTK_IMPORTER;VTK_READER;FORMAT_DESCRIPTION;SCORE;CUSTOM_CODE" "EXTENSIONS;MIMETYPES" ${ARGN})
+  cmake_parse_arguments(F3D_READER "EXCLUDE_FROM_THUMBNAILER" "NAME;VTK_IMPORTER;VTK_READER;FORMAT_DESCRIPTION;SCORE;CUSTOM_CODE" "EXTENSIONS;MIMETYPES" ${ARGN})
 
   if(F3D_READER_CUSTOM_CODE)
     set(F3D_READER_HAS_CUSTOM_CODE 1)
@@ -92,6 +95,7 @@ macro(f3d_plugin_declare_reader)
   string(JSON F3D_READER_JSON
     SET "${F3D_READER_JSON}" "extensions" "[${F3D_READER_EXTENSIONS}]")
 
+  set(F3D_READER_MIMETYPES_THUMB ${F3D_READER_MIMETYPES})
   list(TRANSFORM F3D_READER_MIMETYPES PREPEND "\"")
   list(TRANSFORM F3D_READER_MIMETYPES APPEND "\"")
   list(JOIN F3D_READER_MIMETYPES ", " F3D_READER_MIMETYPES)
@@ -99,15 +103,23 @@ macro(f3d_plugin_declare_reader)
   string(JSON F3D_READER_JSON
     SET "${F3D_READER_JSON}" "mimetypes" "[${F3D_READER_MIMETYPES}]")
 
-  string(JSON F3D_PLUGIN_JSON
-    SET "${F3D_PLUGIN_JSON}" "readers" ${F3D_PLUGIN_CURRENT_READER_INDEX} "${F3D_READER_JSON}")
-
-  math(EXPR "F3D_PLUGIN_CURRENT_READER_INDEX" "${F3D_PLUGIN_CURRENT_READER_INDEX} +1")
+  if (F3D_READER_EXCLUDE_FROM_THUMBNAILER)
+    string(JSON F3D_READER_JSON
+      SET "${F3D_READER_JSON}" "exclude_thumbnailer" "true")
+  else()
+    list(APPEND F3D_PLUGIN_MIMETYPES_THUMB ${F3D_READER_MIMETYPES_THUMB})
+    string(JSON F3D_READER_JSON
+      SET "${F3D_READER_JSON}" "exclude_thumbnailer" "false")
+  endif()
 
   if(F3D_READER_VTK_IMPORTER)
     set(F3D_READER_HAS_SCENE_READER 1)
+    string(JSON F3D_READER_JSON
+      SET "${F3D_READER_JSON}" "full_scene" "true")
   else()
     set(F3D_READER_HAS_SCENE_READER 0)
+    string(JSON F3D_READER_JSON
+      SET "${F3D_READER_JSON}" "full_scene" "false")
   endif()
 
   if(F3D_READER_VTK_READER)
@@ -115,6 +127,11 @@ macro(f3d_plugin_declare_reader)
   else()
     set(F3D_READER_HAS_GEOMETRY_READER 0)
   endif()
+
+  string(JSON F3D_PLUGIN_JSON
+    SET "${F3D_PLUGIN_JSON}" "readers" ${F3D_PLUGIN_CURRENT_READER_INDEX} "${F3D_READER_JSON}")
+
+  math(EXPR "F3D_PLUGIN_CURRENT_READER_INDEX" "${F3D_PLUGIN_CURRENT_READER_INDEX} +1")
 
   configure_file("${_f3dPlugin_dir}/readerBoilerPlate.h.in"
     "${CMAKE_CURRENT_BINARY_DIR}/reader_${F3D_READER_NAME}.h")
@@ -131,6 +148,8 @@ f3d_plugin_build(
   [VTK_MODULES           <string>...]
   [ADDITIONAL_RPATHS     <path>...]
   [MIMETYPE_XML_FILES    <path>...]
+  [CONFIGURATION_DIRS    <path>...]
+  [FREEDESKTOP]
   [FORCE_STATIC])
 ~~~
 
@@ -141,17 +160,22 @@ The `NAME` argument is required. The arguments are as follows:
   * `NAME`: (Required) The name of the plugin.
   * `DESCRIPTION`: The description of the plugin.
   * `VERSION`: The version of the plugin.
-  * `VTK_MODULES`: The list of VTK modules used by the plugin to link with.
+  * `VTK_MODULES`: The list of VTK modules used by the plugin to link with. A few VTK modules are automatically linked.
   * `ADDITIONAL_RPATHS`: The list of additional RPATH for the installed binaries on Unix. VTK path is added automatically.
   * `MIMETYPE_XML_FILES`: The list of mimetype files to install. It's useful for file association on OS using Freedesktop specifications.
+  * `CONFIGURATION_DIRS`: The list of configuration directories to install. Generally contain a load-plugins option and format specific options.
   * `FREEDESKTOP`: If specified, generates .desktop and .thumbnailer used for desktop integration on Linux.
   * `FORCE_STATIC`: If specified, the plugin is built as a static library and embedded into libf3d.
 #]==]
 
 macro(f3d_plugin_build)
-  cmake_parse_arguments(F3D_PLUGIN "FREEDESKTOP;FORCE_STATIC" "NAME;DESCRIPTION;VERSION" "VTK_MODULES;ADDITIONAL_RPATHS;MIMETYPE_XML_FILES" ${ARGN})
+  cmake_parse_arguments(F3D_PLUGIN "FREEDESKTOP;FORCE_STATIC" "NAME;DESCRIPTION;VERSION" "VTK_MODULES;ADDITIONAL_RPATHS;MIMETYPE_XML_FILES;CONFIGURATION_DIRS" ${ARGN})
 
-  find_package(VTK 9.0 REQUIRED COMPONENTS ${F3D_PLUGIN_VTK_MODULES})
+  find_package(VTK 9.0 REQUIRED COMPONENTS
+    CommonCore
+    CommonExecutionModel
+    IOImport
+    ${F3D_PLUGIN_VTK_MODULES})
 
   if(F3D_PLUGIN_FORCE_STATIC OR F3D_PLUGINS_STATIC_BUILD)
     set(F3D_PLUGIN_TYPE "STATIC")
@@ -225,7 +249,8 @@ macro(f3d_plugin_build)
     EXPORT_FILE_NAME plugin_export.h
     EXPORT_MACRO_NAME F3D_PLUGIN_EXPORT)
 
-  if(NOT WIN32)
+  if(UNIX)
+    # On Unix, add the RPATH to VTK install folder
     get_target_property(target_type VTK::CommonCore TYPE)
     if (target_type STREQUAL SHARED_LIBRARY)
       list(APPEND F3D_PLUGIN_ADDITIONAL_RPATHS "$<TARGET_FILE_DIR:VTK::CommonCore>")
@@ -234,24 +259,23 @@ macro(f3d_plugin_build)
       INSTALL_RPATH "${F3D_PLUGIN_ADDITIONAL_RPATHS}")
   endif()
 
-  if(WIN32)
-    set(F3D_PLUGIN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-  else()
-    set(F3D_PLUGIN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-  endif()
-
   set_target_properties(f3d-plugin-${F3D_PLUGIN_NAME} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${F3D_PLUGIN_OUTPUT_DIRECTORY}"
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     )
 
   if(DEFINED f3d_INCLUDE_DIR)
     # External plugin path
+    set(_f3d_has_application "${f3d_BUILD_APPLICATION}")
     set(_f3d_include_path "${f3d_INCLUDE_DIR}/f3d")
+    set(_f3d_config_dir ${f3d_CONFIG_DIR})
+    set(_f3d_plugins_install_dir ${f3d_PLUGINS_INSTALL_DIR})
   else()
     # In-source plugin path
-    set(_f3d_include_path "${CMAKE_SOURCE_DIR}/library/plugin")
+    set(_f3d_has_application "${F3D_BUILD_APPLICATION}")
+    set(_f3d_include_path "${F3D_SOURCE_DIR}/library/plugin")
+    set(_f3d_config_dir ${f3d_config_dir})
+    set(_f3d_plugins_install_dir ${F3D_PLUGINS_INSTALL_DIR})
   endif()
 
   target_include_directories(f3d-plugin-${F3D_PLUGIN_NAME}
@@ -265,16 +289,25 @@ macro(f3d_plugin_build)
   list(TRANSFORM F3D_PLUGIN_VTK_MODULES PREPEND "VTK::")
 
   target_link_libraries(f3d-plugin-${F3D_PLUGIN_NAME} PRIVATE
+    VTK::CommonCore VTK::CommonExecutionModel VTK::IOImport
     ${F3D_PLUGIN_VTK_MODULES}
     ${modules})
 
   if(NOT F3D_PLUGIN_IS_STATIC OR NOT BUILD_SHARED_LIBS)
     install(TARGETS f3d-plugin-${F3D_PLUGIN_NAME}
       EXPORT ${export_name}
-      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT plugin
-      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT plugin
-      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT plugin)
+      ARCHIVE DESTINATION ${_f3d_plugins_install_dir} COMPONENT plugin
+      LIBRARY DESTINATION ${_f3d_plugins_install_dir} COMPONENT plugin)
   endif()
+
+  # Install configurations folders
+  foreach(config_dir ${F3D_PLUGIN_CONFIGURATION_DIRS})
+    install(
+      DIRECTORY "${config_dir}"
+      DESTINATION "${_f3d_config_dir}"
+      COMPONENT configuration
+      EXCLUDE_FROM_ALL)
+  endforeach()
 
   # Generate mime, desktop and thumbnailer files
   if (UNIX AND NOT APPLE AND NOT ANDROID)
@@ -285,17 +318,17 @@ macro(f3d_plugin_build)
         EXCLUDE_FROM_ALL)
     endforeach()
 
-    if(F3D_PLUGIN_FREEDESKTOP)
+    if(F3D_PLUGIN_FREEDESKTOP AND "${_f3d_has_application}")
       configure_file(
         "${_f3dPlugin_dir}/plugin.desktop.in"
-        "${CMAKE_CURRENT_BINARY_DIR}/f3d-plugin-${F3D_PLUGIN_NAME}.desktop")
+        "${CMAKE_BINARY_DIR}/share/applications/f3d-plugin-${F3D_PLUGIN_NAME}.desktop")
       configure_file(
         "${_f3dPlugin_dir}/plugin.thumbnailer.in"
-        "${CMAKE_CURRENT_BINARY_DIR}/f3d-plugin-${F3D_PLUGIN_NAME}.thumbnailer")
-      install(FILES "${CMAKE_CURRENT_BINARY_DIR}/f3d-plugin-${F3D_PLUGIN_NAME}.desktop"
+        "${CMAKE_BINARY_DIR}/share/thumbnailers/f3d-plugin-${F3D_PLUGIN_NAME}.thumbnailer")
+      install(FILES "${CMAKE_BINARY_DIR}/share/applications/f3d-plugin-${F3D_PLUGIN_NAME}.desktop"
         DESTINATION "share/applications"
         COMPONENT plugin)
-      install(FILES "${CMAKE_CURRENT_BINARY_DIR}/f3d-plugin-${F3D_PLUGIN_NAME}.thumbnailer"
+      install(FILES "${CMAKE_BINARY_DIR}/share/thumbnailers/f3d-plugin-${F3D_PLUGIN_NAME}.thumbnailer"
         DESTINATION "share/thumbnailers"
         COMPONENT plugin)
     endif()
@@ -307,7 +340,7 @@ macro(f3d_plugin_build)
   {
     "description" : "Plugin description",
     "name" : "myPlugin",
-    "readers" : 
+    "readers" :
     [
       {
         "description" : "Reader description",
@@ -333,7 +366,7 @@ macro(f3d_plugin_build)
   string(JSON F3D_PLUGIN_JSON
     SET "${F3D_PLUGIN_JSON}" "type" "\"${F3D_PLUGIN_TYPE}\"")
 
-  set(F3D_PLUGIN_JSON_FILE "${CMAKE_CURRENT_BINARY_DIR}/${F3D_PLUGIN_NAME}.json")
+  set(F3D_PLUGIN_JSON_FILE "${CMAKE_BINARY_DIR}/share/f3d/plugins/${F3D_PLUGIN_NAME}.json")
 
   file(WRITE "${F3D_PLUGIN_JSON_FILE}" "${F3D_PLUGIN_JSON}")
 

@@ -5,7 +5,6 @@ set(F3D_VTK_MODULES
   VTK::CommonSystem
   VTK::IOImage
   VTK::InteractionWidgets
-  VTK::jsoncpp
   f3d::VTKExtensionsApplicative
   f3d::VTKExtensionsCore
   f3d::VTKExtensionsReaders
@@ -64,14 +63,19 @@ set(F3D_SOURCE_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/init.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/interactor.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/interactor_impl.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/levenshtein.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/loader_impl.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/log.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/options.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/types.cxx
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/utils.cxx
   ${CMAKE_CURRENT_SOURCE_DIR}/src/window_impl.cxx
   )
 
 # List of headers that will be installed
 set(F3D_PUBLIC_HEADERS
+  ${CMAKE_CURRENT_SOURCE_DIR}/plugin/reader.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/plugin/plugin.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/camera.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/engine.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/exception.h
@@ -82,14 +86,9 @@ set(F3D_PUBLIC_HEADERS
   ${CMAKE_CURRENT_SOURCE_DIR}/public/log.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/options.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/types.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/public/utils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/public/window.h
   )
-
-if (F3D_INSTALL_SDK_PLUGIN)
-  list(APPEND F3D_PUBLIC_HEADERS
-    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/reader.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/plugin.h)
-endif ()
 
 add_library(libf3d
   ${F3D_SOURCE_FILES}
@@ -105,11 +104,14 @@ target_include_directories(libf3d
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/plugin>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/plugin>
   )
+if (F3D_USE_EXTERNAL_NLOHMANN_JSON)
+  target_link_libraries(libf3d PRIVATE nlohmann_json::nlohmann_json)
+else ()
+  target_include_directories(libf3d PRIVATE
+    $<BUILD_INTERFACE:${F3D_SOURCE_DIR}/external/nlohmann_json>)
+endif ()
 
 set_target_properties(libf3d PROPERTIES
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
   CXX_STANDARD 17
   CXX_VISIBILITY_PRESET hidden
   POSITION_INDEPENDENT_CODE ON
@@ -117,22 +119,32 @@ set_target_properties(libf3d PROPERTIES
   PDB_NAME "libf3d"
   )
 
+# It can be useful to disable soversion in case the links are duplicated
+# It happens with Python wheels for example
+option(F3D_ENABLE_SOVERSION "Enable libf3d SOVERSION" ON)
+mark_as_advanced(F3D_ENABLE_SOVERSION)
+if(F3D_ENABLE_SOVERSION)
+  set_target_properties(libf3d PROPERTIES
+    VERSION ${F3D_MAJOR_VERSION}.${F3D_MINOR_VERSION}
+    SOVERSION ${F3D_MAJOR_VERSION}
+  )
+endif()
+
 # Generate export macros for exported public APIs
 include(GenerateExportHeader)
+set(libf3d_no_deprecated)
+if(F3D_EXCLUDE_DEPRECATED)
+  set(libf3d_no_deprecated "DEFINE_NO_DEPRECATED")
+endif()
 generate_export_header(libf3d
   EXPORT_FILE_NAME public/export.h
-  EXPORT_MACRO_NAME F3D_EXPORT)
+  BASE_NAME F3D
+  ${libf3d_no_deprecated})
 
 target_include_directories(libf3d
   INTERFACE
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   )
-
-if(F3D_INSTALL_SDK)
-  set_target_properties(libf3d PROPERTIES
-    PUBLIC_HEADER "${F3D_PUBLIC_HEADERS}"
-    )
-endif()
 
 vtk_module_autoinit(TARGETS libf3d MODULES ${F3D_VTK_MODULES})
 
@@ -165,13 +177,27 @@ if(F3D_STRICT_BUILD AND MSVC)
   target_compile_definitions(libf3d PRIVATE _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
 endif()
 
+if(APPLE)
+  set_target_properties(libf3d PROPERTIES INSTALL_RPATH "@loader_path")
+elseif(UNIX)
+  set_target_properties(libf3d PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
+
 if (APPLE OR UNIX)
   # Make sure rpath is correctly set for libf3d
   get_target_property(target_type VTK::CommonCore TYPE)
   if (target_type STREQUAL SHARED_LIBRARY)
-    set_target_properties(libf3d PROPERTIES INSTALL_RPATH "$<TARGET_FILE_DIR:VTK::CommonCore>")
+    set_target_properties(libf3d PROPERTIES BUILD_RPATH "$<TARGET_FILE_DIR:VTK::CommonCore>")
   endif ()
 endif ()
+
+if(UNIX AND NOT APPLE)
+  option(F3D_LINUX_LIBRARY_LINK_ATOMIC "Link with libatomic" OFF)
+  mark_as_advanced(F3D_LINUX_LIBRARY_LINK_ATOMIC)
+  if(F3D_LINUX_LIBRARY_LINK_ATOMIC)
+    target_link_libraries(libf3d PRIVATE atomic)
+  endif()
+endif()
 
 # Testing
 if(BUILD_TESTING)
@@ -179,48 +205,55 @@ if(BUILD_TESTING)
 endif()
 
 # Installing
-if(F3D_INSTALL_SDK OR BUILD_SHARED_LIBS)
+if(BUILD_SHARED_LIBS)
   install(TARGETS libf3d
     EXPORT f3dTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT library
+    RUNTIME_DEPENDENCY_SET libf3dDeps
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT sdk EXCLUDE_FROM_ALL
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT library
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT library
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/f3d COMPONENT headers)
-endif()
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT library)
 
-if(F3D_INSTALL_SDK)
+  # Install dependencies, but exclude system libraries
+  set(F3D_DEPENDENCIES_DIR "" CACHE STRING "Semicolon separated directories for dependencies look up")
+  install(RUNTIME_DEPENDENCY_SET libf3dDeps
+    COMPONENT dependencies EXCLUDE_FROM_ALL
+    PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-"
+    POST_EXCLUDE_REGEXES ".*system32/.*" "^/usr/lib.*" "^/lib.*" "^/var/lib.*"
+    DIRECTORIES "${F3D_DEPENDENCIES_DIR}")
+
+  install(FILES ${F3D_PUBLIC_HEADERS}
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/f3d"
+    COMPONENT sdk
+    EXCLUDE_FROM_ALL)
+
   install(EXPORT f3dTargets
     NAMESPACE f3d::
-    DESTINATION "lib/cmake/f3d"
-    COMPONENT cmake)
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/f3d"
+    COMPONENT sdk
+    EXCLUDE_FROM_ALL)
 
   include(CMakePackageConfigHelpers)
   configure_package_config_file(
-    "${CMAKE_SOURCE_DIR}/cmake/f3dConfig.cmake.in" "${CMAKE_BINARY_DIR}/cmake/f3dConfig.cmake"
-    INSTALL_DESTINATION "lib/cmake/f3d")
+    "${F3D_SOURCE_DIR}/cmake/f3dConfig.cmake.in" "${CMAKE_BINARY_DIR}/cmake/f3dConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/f3d")
+
   write_basic_package_version_file(
     "${CMAKE_BINARY_DIR}/cmake/f3dConfigVersion.cmake"
-    VERSION "${PROJECT_VERSION}"
+    VERSION "${F3D_VERSION}"
     COMPATIBILITY SameMinorVersion)
 
-  set(sdk_cmake_files
-    "${CMAKE_BINARY_DIR}/cmake/f3dConfig.cmake"
-    "${CMAKE_BINARY_DIR}/cmake/f3dConfigVersion.cmake"
-    "${CMAKE_SOURCE_DIR}/cmake/f3dEmbed.cmake")
-
-  if (F3D_INSTALL_SDK_PLUGIN)
-    list(APPEND sdk_cmake_files
-      "${CMAKE_SOURCE_DIR}/cmake/f3dPlugin.cmake"
-      "${CMAKE_SOURCE_DIR}/cmake/plugin.cxx.in"
-      "${CMAKE_SOURCE_DIR}/cmake/plugin.desktop.in"
-      "${CMAKE_SOURCE_DIR}/cmake/plugin.thumbnailer.in"
-      "${CMAKE_SOURCE_DIR}/cmake/readerBoilerPlate.h.in")
-  endif ()
-
   install(
-    FILES ${sdk_cmake_files}
+    FILES
+      "${CMAKE_BINARY_DIR}/cmake/f3dConfig.cmake"
+      "${CMAKE_BINARY_DIR}/cmake/f3dConfigVersion.cmake"
+      "${F3D_SOURCE_DIR}/cmake/f3dEmbed.cmake"
+      "${F3D_SOURCE_DIR}/cmake/f3dPlugin.cmake"
+      "${F3D_SOURCE_DIR}/cmake/plugin.cxx.in"
+      "${F3D_SOURCE_DIR}/cmake/plugin.desktop.in"
+      "${F3D_SOURCE_DIR}/cmake/plugin.thumbnailer.in"
+      "${F3D_SOURCE_DIR}/cmake/readerBoilerPlate.h.in"
     DESTINATION
-      "lib/cmake/f3d"
-    COMPONENT cmake)
-
+      "${CMAKE_INSTALL_LIBDIR}/cmake/f3d"
+    COMPONENT sdk
+    EXCLUDE_FROM_ALL)
 endif()

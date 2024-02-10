@@ -1,30 +1,75 @@
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.21)
 include(CMakeDependentOption)
 
+# Generic CMake variables, should be done before project()
+set(output_postfix "")
+get_property(F3D_MULTI_CONFIG_GENERATOR GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(${F3D_MULTI_CONFIG_GENERATOR})
+  set(output_postfix "_$<CONFIG>")
+  if(NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "Multi-config types" FORCE)
+  endif()
+else()
+  if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
+  endif()
+endif()
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin${output_postfix}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib${output_postfix}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib${output_postfix}")
+
 project(F3D
-  VERSION "1.3.1"
   DESCRIPTION "F3D - A fast and minimalist 3D viewer"
   LANGUAGES C CXX)
+
+set(f3d_cmake_dir "${F3D_SOURCE_DIR}/cmake")
+list(INSERT CMAKE_MODULE_PATH 0 "${f3d_cmake_dir}")
+include(f3dVersion)
+
+# Handle F3D_VERSION
+set(F3D_MAJOR_VERSION 2)
+set(F3D_MINOR_VERSION 3)
+set(F3D_PATCH_VERSION 0)
+set(F3D_VERSION ${F3D_MAJOR_VERSION}.${F3D_MINOR_VERSION}.${F3D_PATCH_VERSION})
+
+set(F3D_PATCH_VERSION_EXTRA "")
+if(F3D_PATCH_VERSION_EXTRA STREQUAL "")
+  set(F3D_VERSION_FULL ${F3D_VERSION})
+else()
+  set(F3D_VERSION_FULL ${F3D_VERSION}-${F3D_PATCH_VERSION_EXTRA})
+endif()
+
+find_package(Git QUIET)
+f3d_determine_version("${CMAKE_CURRENT_SOURCE_DIR}" "${GIT_EXECUTABLE}" "F3D")
 
 string(TIMESTAMP F3D_BUILD_DATE "%Y-%m-%d %H:%M:%S" UTC)
 
 math(EXPR F3D_SYSTEM_PROCESSOR "8 * ${CMAKE_SIZEOF_VOID_P}")
 set(F3D_SYSTEM_PROCESSOR "${F3D_SYSTEM_PROCESSOR}-bits")
 
-# Generic CMake variables
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
-  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
-endif()
+option(F3D_EXCLUDE_DEPRECATED "Exclude deprecated functions and options" OFF)
 
 # Modules
 option(F3D_MODULE_EXTERNAL_RENDERING "External rendering module" OFF)
 option(F3D_MODULE_RAYTRACING "Raytracing module" OFF)
+option(F3D_MODULE_EXR "OpenEXR images module" OFF)
 
-option(F3D_INSTALL_SDK "Install F3D library SDK" OFF)
-cmake_dependent_option(F3D_INSTALL_SDK_PLUGIN "Install F3D plugin SDK" OFF "F3D_INSTALL_SDK" ON)
+# Use externals
+option(F3D_USE_EXTERNAL_CXXOPTS "Use external cxxopts dependency" OFF)
+option(F3D_USE_EXTERNAL_NLOHMANN_JSON "Use external nlohmann_json dependency" OFF)
+
+if (F3D_USE_EXTERNAL_CXXOPTS)
+  find_package(cxxopts REQUIRED)
+endif ()
+if (F3D_USE_EXTERNAL_NLOHMANN_JSON)
+  find_package(nlohmann_json REQUIRED)
+endif ()
 
 # VTK dependency
+# Optional components should list VTK modules
+# needed by plugins and optional modules
 find_package(VTK 9.0 REQUIRED
   COMPONENTS
     CommonCore
@@ -53,6 +98,7 @@ find_package(VTK 9.0 REQUIRED
     opengl
   OPTIONAL_COMPONENTS
     IOExodus
+    IOOpenVDB
     RenderingExternal
     RenderingRayTracing)
 message(STATUS "VTK ${VTK_VERSION} found")
@@ -114,24 +160,48 @@ endif()
 
 # Testing
 option(BUILD_TESTING "Build the tests" OFF)
-cmake_dependent_option(F3D_TESTING_DISABLE_DEFAULT_LIGHTS_TESTS_COMPARISON "Disable image comparison on tests using the default lights" OFF "BUILD_TESTING" ON)
-cmake_dependent_option(F3D_TESTING_ENABLE_RENDERING_TESTS "Enable rendering tests" ON "BUILD_TESTING" ON)
-cmake_dependent_option(F3D_TESTING_ENABLE_LONG_TIMEOUT_TESTS "Enable long timeout tests" OFF "BUILD_TESTING" ON)
-cmake_dependent_option(F3D_TESTING_ENABLE_HDRI_TESTS "Enable HDRi related tests" ON "F3D_TESTING_RENDRERING_TESTS" ON "F3D_TESTING_ENABLE_LONG_TIMEOUT_TESTS" ON "BUILD_TESTING" ON)
+cmake_dependent_option(F3D_TESTING_DISABLE_DEFAULT_LIGHTS_TESTS_COMPARISON "Disable image comparison on tests using the default lights" OFF "BUILD_TESTING" OFF)
+cmake_dependent_option(F3D_TESTING_ENABLE_RENDERING_TESTS "Enable rendering tests" ON "BUILD_TESTING" OFF)
+cmake_dependent_option(F3D_TESTING_ENABLE_LONG_TIMEOUT_TESTS "Enable long timeout tests" OFF "BUILD_TESTING" OFF)
 if(BUILD_TESTING)
   enable_testing()
 endif()
 
+# Figure out F3D configuration directory
+if(UNIX AND NOT APPLE)
+  option(F3D_LINUX_INSTALL_DEFAULT_CONFIGURATION_FILE_IN_PREFIX "Install the default configuration at the prefix root instead of system wide" OFF)
+  mark_as_advanced(F3D_LINUX_INSTALL_DEFAULT_CONFIGURATION_FILE_IN_PREFIX)
+endif()
+
+set(f3d_resources_dir "share/f3d")
+if (F3D_MACOS_BUNDLE)
+  set(f3d_resources_dir "f3d.app/Contents/Resources")
+endif()
+
+## Will be stored in f3dConfig.cmake
+set(f3d_config_dir "${f3d_resources_dir}/configs")
+if (UNIX AND NOT APPLE)
+  if (NOT F3D_LINUX_INSTALL_DEFAULT_CONFIGURATION_FILE_IN_PREFIX)
+    set(f3d_config_dir "${CMAKE_INSTALL_FULL_SYSCONFDIR}/f3d")
+  endif()
+endif()
+
+# F3D Application
+cmake_dependent_option(F3D_BUILD_APPLICATION "Build the application" ON "NOT ANDROID AND NOT EMSCRIPTEN" OFF)
+
 # plugins
 option(F3D_PLUGINS_STATIC_BUILD "Make all plugins static (embedded into libf3d) and automatically loaded by F3D" ON)
 mark_as_advanced(F3D_PLUGINS_STATIC_BUILD)
+if (F3D_MACOS_BUNDLE AND NOT F3D_PLUGINS_STATIC_BUILD)
+  message(FATAL_ERROR "Building a macOS Bundle do not support loading plugins dynamically")
+endif()
+set(F3D_PLUGINS_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "Plugins install directory relative path")
+mark_as_advanced(F3D_PLUGINS_INSTALL_DIR)
 add_subdirectory(plugins)
 
 # libf3d target
 add_subdirectory(library)
 
-# F3D Application
-cmake_dependent_option(F3D_BUILD_APPLICATION "Build the application" ON "NOT ANDROID AND NOT EMSCRIPTEN" OFF)
 if (F3D_BUILD_APPLICATION)
   add_subdirectory(application)
 endif()
@@ -159,20 +229,6 @@ if(EMSCRIPTEN)
   add_subdirectory(webassembly)
 endif ()
 
-# Installation
-option(F3D_INSTALL_DEFAULT_CONFIGURATION_FILE "Install a default configuration file" OFF)
-mark_as_advanced(F3D_INSTALL_DEFAULT_CONFIGURATION_FILE)
-if(UNIX AND NOT APPLE)
-  cmake_dependent_option(F3D_LINUX_INSTALL_DEFAULT_CONFIGURATION_FILE_IN_PREFIX "Install the default configuration at the prefix root instead of system wide" OFF
-    "F3D_INSTALL_DEFAULT_CONFIGURATION_FILE" OFF)
-  mark_as_advanced(F3D_LINUX_INSTALL_DEFAULT_CONFIGURATION_FILE_IN_PREFIX)
-endif()
-
-if(WIN32)
-  option(F3D_WINDOWS_INSTALL_LOGOS_FOR_NSIS_PACKAGING "Install logos for nsis packaging" OFF)
-  mark_as_advanced(F3D_WINDOWS_INSTALL_LOGOS_FOR_NSIS_PACKAGING)
-endif()
-
 # Installing licenses
 set(F3D_LIC_DIR ".")
 
@@ -188,5 +244,13 @@ if (F3D_BUILD_APPLICATION)
     DESTINATION ${F3D_LIC_DIR} COMPONENT licenses)
 endif ()
 
-# Installling resources
-add_subdirectory(resources)
+# Check that a LFS data file is big enough to be an actual file
+file(SIZE "${F3D_SOURCE_DIR}/testing/data/dragon.vtu" f3d_lfs_file_size)
+if (f3d_lfs_file_size LESS_EQUAL 500)
+  if(BUILD_TESTING)
+    message(FATAL_ERROR "Building tests without LFS data will result in non fonctionning tests, please fetch LFS data or disable BUILD_TESTING. Aborting.")
+  endif()
+  if (F3D_BINDINGS_PYTHON)
+    message(WARNING "Building python binding without LFS data is supported but testing using pytest will not be, please fetch LFS data to avoid this.")
+  endif()
+endif()

@@ -6,26 +6,23 @@ include(GNUInstallDirs)
 
 find_package(f3d REQUIRED)
 
-# Check Plugin SDK is available
-if(NOT (DEFINED f3d_SDK_PLUGIN AND ${f3d_SDK_PLUGIN}))
-  message(FATAL_ERROR "f3d_SDK_PLUGIN is not enabled, can't configure plugin")
-endif()
-message(STATUS "f3d_SDK_PLUGIN is enabled")
-
 f3d_plugin_init()
 
 f3d_plugin_declare_reader(
   NAME ExampleReader
   EXTENSIONS expl
+  MIMETYPES application/vnd.expl
   VTK_READER vtkF3DExampleReader
-  DESCRIPTION "Example reader"
+  FORMAT_DESCRIPTION "Example reader"
 )
 
 f3d_plugin_build(
   NAME example
   VERSION 1.0
   DESCRIPTION "Example plugin"
-  VTK_MODULES CommonCore CommonExecutionModel
+  MIMETYPE_XML_FILES "${CMAKE_CURRENT_SOURCE_DIR}/f3d-example-formats.xml"
+  CONFIGURATION_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/configs/config.d" "${CMAKE_CURRENT_SOURCE_DIR}/configs/thumbnail.d"
+  FREEDESKTOP
 )
 
 if(BUILD_TESTING)
@@ -34,6 +31,7 @@ if(BUILD_TESTING)
           COMMAND "$<TARGET_FILE:f3d::f3d>"
                   "--dry-run"
                   "--no-render"
+                  "--verbose"
                   "--load-plugins=$<TARGET_FILE:f3d-plugin-example>"
                   "${CMAKE_CURRENT_SOURCE_DIR}/data.expl"
   )

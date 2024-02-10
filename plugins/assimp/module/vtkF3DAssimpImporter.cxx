@@ -36,6 +36,7 @@
 #include <assimp/scene.h>
 
 #include <memory>
+#include <regex>
 
 vtkStandardNewMacro(vtkF3DAssimpImporter);
 
@@ -43,7 +44,7 @@ class vtkF3DAssimpImporter::vtkInternals
 {
 public:
   //----------------------------------------------------------------------------
-  vtkInternals(vtkF3DAssimpImporter* parent)
+  explicit vtkInternals(vtkF3DAssimpImporter* parent)
     : Parent(parent)
   {
   }
@@ -150,7 +151,7 @@ public:
           }
 
           renderer->AddLight(light);
-          this->Lights.push_back({ aLight->mName.data, light });
+          this->Lights.emplace_back(aLight->mName.data, light);
         }
       }
 
@@ -170,9 +171,14 @@ public:
     if (path[0] == '*')
     {
       int texIndex = std::atoi(path + 1);
-      vTexture = this->EmbeddedTextures[texIndex];
+
+      if (texIndex >= 0 && texIndex < static_cast<int>(this->EmbeddedTextures.size()))
+      {
+        vTexture = this->EmbeddedTextures[texIndex];
+      }
     }
-    else
+
+    if (!vTexture)
     {
       // sometimes, embedded textures are indexed by filename
       const aiTexture* aTexture = this->Scene->GetEmbeddedTexture(path);
@@ -220,6 +226,7 @@ public:
 
     vTexture->MipmapOn();
     vTexture->InterpolateOn();
+    vTexture->SetColorModeToDirectScalars();
     vTexture->SetUseSRGBColorSpace(sRGB);
 
     return vTexture;
@@ -256,15 +263,24 @@ public:
     }
     else
     {
-      vtkNew<vtkImageData> img;
-      img->SetDimensions(aTexture->mWidth, aTexture->mHeight, 1);
-      img->AllocateScalars(VTK_UNSIGNED_CHAR, 4);
+      // Sometimes Assimp returns corrupted textures (encountered with 3MF)
+      // Let's validate it before trying to read it
+      // See https://github.com/assimp/assimp/issues/5328
+      std::regex validRegexp("[rgba]{4}[0-9]{4}");
 
-      unsigned char* imageBuffer = reinterpret_cast<unsigned char*>(img->GetScalarPointer());
-      std::copy(imageBuffer, imageBuffer + 4 * aTexture->mWidth * aTexture->mHeight,
-        reinterpret_cast<unsigned char*>(aTexture->pcData));
+      if (std::regex_match(aTexture->achFormatHint, validRegexp))
+      {
+        // only "rgba8888" is supported for now
+        vtkNew<vtkImageData> img;
+        img->SetDimensions(aTexture->mWidth, aTexture->mHeight, 1);
+        img->AllocateScalars(VTK_UNSIGNED_CHAR, 4);
 
-      vTexture->SetInputData(img);
+        unsigned char* imageBuffer = reinterpret_cast<unsigned char*>(img->GetScalarPointer());
+        std::copy(imageBuffer, imageBuffer + 4 * aTexture->mWidth * aTexture->mHeight,
+          reinterpret_cast<unsigned char*>(aTexture->pcData));
+
+        vTexture->SetInputData(img);
+      }
     }
 
     return vTexture;
@@ -330,7 +346,7 @@ public:
     aiString texDiffuse;
     if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texDiffuse) == aiReturn_SUCCESS)
     {
-      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texDiffuse.data);
+      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texDiffuse.C_Str());
       if (tex)
       {
         property->SetTexture("diffuseTex", tex);
@@ -340,7 +356,7 @@ public:
     aiString texNormal;
     if (material->GetTexture(aiTextureType_NORMALS, 0, &texNormal) == aiReturn_SUCCESS)
     {
-      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texNormal.data);
+      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texNormal.C_Str());
       if (tex)
       {
         property->SetTexture("normalTex", tex);
@@ -350,7 +366,7 @@ public:
     aiString texAlbedo;
     if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texAlbedo) == aiReturn_SUCCESS)
     {
-      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texAlbedo.data, true);
+      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texAlbedo.C_Str(), true);
       if (tex)
       {
         property->SetTexture("albedoTex", tex);
@@ -360,7 +376,7 @@ public:
     aiString texEmissive;
     if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texEmissive) == aiReturn_SUCCESS)
     {
-      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texEmissive.data, true);
+      vtkSmartPointer<vtkTexture> tex = this->CreateTexture(texEmissive.C_Str(), true);
       if (tex)
       {
         property->SetTexture("emissiveTex", tex);
@@ -604,7 +620,7 @@ public:
       }
 
       // convert materials to properties
-      this->Properties.resize(this->Scene->mNumMeshes);
+      this->Properties.resize(this->Scene->mNumMaterials);
       for (unsigned int i = 0; i < this->Scene->mNumMaterials; i++)
       {
         this->Properties[i] = this->CreateMaterial(this->Scene->mMaterials[i]);
@@ -810,7 +826,18 @@ public:
                   vtkNew<vtkMatrix4x4> boneMat;
                   bonesTransform->GetTypedTuple(i, boneMat->GetData());
 
-                  vtkMatrix4x4::Multiply4x4(this->NodeGlobalMatrix[boneName], boneMat, boneMat);
+                  auto globalMatrix = this->NodeGlobalMatrix[boneName];
+
+                  if (globalMatrix)
+                  {
+                    vtkMatrix4x4::Multiply4x4(globalMatrix, boneMat, boneMat);
+                  }
+                  else
+                  {
+                    vtkWarningWithObjectMacro(
+                      this->Parent, "Cannot find global matrix of bone " << boneName);
+                  }
+
                   vtkMatrix4x4::Multiply4x4(inverseRoot, boneMat, boneMat);
 
                   for (int j = 0; j < 4; j++)
@@ -836,7 +863,7 @@ public:
   }
 
   Assimp::Importer Importer;
-  const aiScene* Scene;
+  const aiScene* Scene = nullptr;
   std::string Description;
   std::vector<vtkSmartPointer<vtkPolyData> > Meshes;
   std::vector<vtkSmartPointer<vtkProperty> > Properties;
@@ -884,7 +911,7 @@ std::string vtkF3DAssimpImporter::GetOutputsDescription()
 }
 
 //----------------------------------------------------------------------------
-void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
+void vtkF3DAssimpImporter::UpdateTimeStep(double timeValue)
 {
   if (this->Internals->ActiveAnimation < 0 ||
     this->Internals->ActiveAnimation >= this->GetNumberOfAnimations())
@@ -893,9 +920,15 @@ void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
   }
 
   // get the animation tick
-  timestep *= this->Internals->Scene->mAnimations[0]->mTicksPerSecond;
+  double fps =
+    this->Internals->Scene->mAnimations[this->Internals->ActiveAnimation]->mTicksPerSecond;
+  if (fps == 0.0)
+  {
+    fps = 1.0;
+  }
 
   aiAnimation* anim = this->Internals->Scene->mAnimations[this->Internals->ActiveAnimation];
+  double tick = timeValue * fps;
 
   Assimp::Interpolator<aiVectorKey> vectorInterpolator;
   Assimp::Interpolator<aiQuatKey> quaternionInterpolator;
@@ -909,7 +942,7 @@ void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
     aiQuaternion quaternion;
 
     aiVectorKey* positionKey = std::lower_bound(nodeAnim->mPositionKeys,
-      nodeAnim->mPositionKeys + nodeAnim->mNumPositionKeys, timestep,
+      nodeAnim->mPositionKeys + nodeAnim->mNumPositionKeys, tick,
       [](const aiVectorKey& key, const double& time) { return key.mTime < time; });
 
     if (positionKey == nodeAnim->mPositionKeys)
@@ -923,12 +956,12 @@ void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
     else
     {
       aiVectorKey* prev = positionKey - 1;
-      ai_real d = (timestep - prev->mTime) / (positionKey->mTime - prev->mTime);
+      ai_real d = (tick - prev->mTime) / (positionKey->mTime - prev->mTime);
       vectorInterpolator(translation, *prev, *positionKey, d);
     }
 
     aiQuatKey* rotationKey = std::lower_bound(nodeAnim->mRotationKeys,
-      nodeAnim->mRotationKeys + nodeAnim->mNumRotationKeys, timestep,
+      nodeAnim->mRotationKeys + nodeAnim->mNumRotationKeys, tick,
       [](const aiQuatKey& key, const double& time) { return key.mTime < time; });
 
     if (rotationKey == nodeAnim->mRotationKeys)
@@ -942,13 +975,13 @@ void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
     else
     {
       aiQuatKey* prev = rotationKey - 1;
-      ai_real d = (timestep - prev->mTime) / (rotationKey->mTime - prev->mTime);
+      ai_real d = (tick - prev->mTime) / (rotationKey->mTime - prev->mTime);
       quaternionInterpolator(quaternion, *prev, *rotationKey, d);
     }
 
     aiVectorKey* scalingKey =
       std::lower_bound(nodeAnim->mScalingKeys, nodeAnim->mScalingKeys + nodeAnim->mNumScalingKeys,
-        timestep, [](const aiVectorKey& key, const double& time) { return key.mTime < time; });
+        tick, [](const aiVectorKey& key, const double& time) { return key.mTime < time; });
 
     if (scalingKey == nodeAnim->mScalingKeys)
     {
@@ -961,7 +994,7 @@ void vtkF3DAssimpImporter::UpdateTimeStep(double timestep)
     else
     {
       aiVectorKey* prev = scalingKey - 1;
-      ai_real d = (timestep - prev->mTime) / (scalingKey->mTime - prev->mTime);
+      ai_real d = (tick - prev->mTime) / (scalingKey->mTime - prev->mTime);
       vectorInterpolator(scaling, *prev, *scalingKey, d);
     }
 
@@ -1030,11 +1063,16 @@ bool vtkF3DAssimpImporter::IsAnimationEnabled(vtkIdType animationIndex)
 // Complete GetTemporalInformation needs https://gitlab.kitware.com/vtk/vtk/-/merge_requests/7246
 #if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20200912)
 //----------------------------------------------------------------------------
-bool vtkF3DAssimpImporter::GetTemporalInformation(vtkIdType animationIndex, double frameRate,
-  int& nbTimeSteps, double timeRange[2], vtkDoubleArray* timeSteps)
+bool vtkF3DAssimpImporter::GetTemporalInformation(vtkIdType animationIndex,
+  double vtkNotUsed(frameRate), int& vtkNotUsed(nbTimeSteps), double timeRange[2],
+  vtkDoubleArray* vtkNotUsed(timeSteps))
 {
   double duration = this->Internals->Scene->mAnimations[animationIndex]->mDuration;
   double fps = this->Internals->Scene->mAnimations[animationIndex]->mTicksPerSecond;
+  if (fps == 0.0)
+  {
+    fps = 1.0;
+  }
 
   this->Internals->Description += "Animation \"";
   this->Internals->Description += this->GetAnimationName(animationIndex);
@@ -1044,25 +1082,9 @@ bool vtkF3DAssimpImporter::GetTemporalInformation(vtkIdType animationIndex, doub
   this->Internals->Description += std::to_string(fps);
   this->Internals->Description += " fps.\n";
 
-  if (fps == 0.0)
-  {
-    fps = frameRate;
-  }
-
+  // F3D do not care about timesteps, only set time range
   timeRange[0] = 0.0;
   timeRange[1] = duration / fps;
-
-  timeSteps->SetNumberOfComponents(1);
-  timeSteps->SetNumberOfTuples(0);
-
-  nbTimeSteps = 0;
-
-  for (double time = 0.0; time < timeRange[1]; time += (1.0 / frameRate))
-  {
-    timeSteps->InsertNextTuple(&time);
-    nbTimeSteps++;
-  }
-
   return true;
 }
 #endif

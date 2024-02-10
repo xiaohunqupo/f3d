@@ -5,10 +5,21 @@ leak:nvidia-glcore
 leak:ld-linux-x86-64
 
 # OCCT
-leak:TKernel
+leak:TKBO
+leak:TKG2d
+leak:TKG3d
+leak:TKIGES
+leak:TKMath
+leak:TKMesh
+leak:TKVCAF
 leak:TKXSBase
+leak:TKernel
+
+# TBB
+leak:libtbb
 
 # Potential mesa/VTK leak with incomplete callstack
-# forces us to hide all leaks from the libf3dSDKTests
+# forces us to hide all leaks from the tests using a render window
 # https://gitlab.kitware.com/vtk/vtk/-/issues/18504
 leak:libf3dSDKTests
+leak:VTKExtensionsRenderingTests

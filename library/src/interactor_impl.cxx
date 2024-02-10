@@ -13,7 +13,9 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCellPicker.h>
 #include <vtkMath.h>
+#include <vtkMatrix3x3.h>
 #include <vtkNew.h>
+#include <vtkPicker.h>
 #include <vtkPointPicker.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
@@ -25,6 +27,8 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+
+#include "camera.h"
 
 namespace f3d::detail
 {
@@ -71,8 +75,76 @@ public:
 #endif
   }
 
+  //----------------------------------------------------------------------------
+  // Method defined to normalize the Z axis so all models are treated temporarily
+  // as Z-up axis models.
+  void ToEnvironmentSpace(vtkMatrix3x3* transform)
+  {
+    vtkRenderer* renderer =
+      this->VTKInteractor->GetRenderWindow()->GetRenderers()->GetFirstRenderer();
+    const double* up = renderer->GetEnvironmentUp();
+    const double* right = renderer->GetEnvironmentRight();
+    double fwd[3];
+    vtkMath::Cross(right, up, fwd);
+    const double m[9] = {
+      right[0], right[1], right[2], //
+      fwd[0], fwd[1], fwd[2],       //
+      up[0], up[1], up[2],          //
+    };
+    transform->DeepCopy(m);
+  }
+
+  //----------------------------------------------------------------------------
+  // Set the view orbit position on the viewport.
+  enum class ViewType
+  {
+    VT_FRONT,
+    VT_RIGHT,
+    VT_TOP,
+    VT_ISOMETRIC
+  };
+  static void SetViewOrbit(ViewType view, internals* self)
+  {
+    vtkNew<vtkMatrix3x3> transform;
+    self->ToEnvironmentSpace(transform);
+    camera& cam = self->Window.getCamera();
+    vector3_t up = { 0, 0, 1 };
+    point3_t foc = cam.getFocalPoint();
+    point3_t axis, newPos;
+
+    switch (view)
+    {
+      case ViewType::VT_FRONT:
+        axis = { 0, +1, 0 };
+        break;
+      case ViewType::VT_RIGHT:
+        axis = { +1, 0, 0 };
+        break;
+      case ViewType::VT_TOP:
+        axis = { 0, 0, +1 };
+        up = { 0, -1, 0 };
+        break;
+      case ViewType::VT_ISOMETRIC:
+        axis = { -1, +1, +1 };
+        break;
+    }
+
+    transform->MultiplyPoint(up.data(), up.data());
+    transform->MultiplyPoint(axis.data(), axis.data());
+
+    newPos[0] = foc[0] + axis[0];
+    newPos[1] = foc[1] + axis[1];
+    newPos[2] = foc[2] + axis[2];
+
+    /* set camera coordinates back */
+    cam.setPosition(newPos);
+    cam.setViewUp(up);
+    cam.resetToBounds(0.9);
+  }
+
   static void OnKeyPress(vtkObject*, unsigned long, void* clientData, void*)
   {
+
     internals* self = static_cast<internals*>(clientData);
     vtkRenderWindowInteractor* rwi = self->Style->GetInteractor();
     int keyCode = std::toupper(rwi->GetKeyCode());
@@ -95,12 +167,13 @@ public:
     bool checkColoring = false;
     bool render = false;
 
+    // Available keycodes: W
     switch (keyCode)
     {
       case 'C':
         if (renWithColor)
         {
-          renWithColor->CycleScalars(vtkF3DRendererWithColoring::F3D_FIELD_CYCLE);
+          renWithColor->CycleScalars(vtkF3DRendererWithColoring::CycleType::FIELD);
           self->Window.PrintColoringDescription(log::VerboseLevel::DEBUG);
           checkColoring = true;
           render = true;
@@ -109,7 +182,7 @@ public:
       case 'S':
         if (renWithColor)
         {
-          renWithColor->CycleScalars(vtkF3DRendererWithColoring::F3D_ARRAY_CYCLE);
+          renWithColor->CycleScalars(vtkF3DRendererWithColoring::CycleType::ARRAY_INDEX);
           self->Window.PrintColoringDescription(log::VerboseLevel::DEBUG);
           checkColoring = true;
           render = true;
@@ -118,7 +191,7 @@ public:
       case 'Y':
         if (renWithColor)
         {
-          renWithColor->CycleScalars(vtkF3DRendererWithColoring::F3D_COMPONENT_CYCLE);
+          renWithColor->CycleScalars(vtkF3DRendererWithColoring::CycleType::COMPONENT);
           self->Window.PrintColoringDescription(log::VerboseLevel::DEBUG);
           checkColoring = true;
           render = true;
@@ -128,17 +201,16 @@ public:
         self->Options.toggle("ui.bar");
         render = true;
         break;
-      case 'p':
       case 'P':
-        self->Options.toggle("render.effect.depth-peeling");
+        self->Options.toggle("render.effect.translucency-support");
         render = true;
         break;
       case 'Q':
-        self->Options.toggle("render.effect.ssao");
+        self->Options.toggle("render.effect.ambient-occlusion");
         render = true;
         break;
       case 'A':
-        self->Options.toggle("render.effect.fxaa");
+        self->Options.toggle("render.effect.anti-aliasing");
         render = true;
         break;
       case 'T':
@@ -199,6 +271,14 @@ public:
         self->Options.toggle("interactor.trackball");
         render = true;
         break;
+      case 'F':
+        self->Options.toggle("render.hdri.ambient");
+        render = true;
+        break;
+      case 'J':
+        self->Options.toggle("render.background.skybox");
+        render = true;
+        break;
       case 'L':
       {
         const double intensity = self->Options.getAsDouble("render.light.intensity");
@@ -231,29 +311,24 @@ public:
         self->Window.PrintColoringDescription(log::VerboseLevel::INFO);
         self->Window.PrintSceneDescription(log::VerboseLevel::INFO);
         break;
+      case '1':
+        self->SetViewOrbit(ViewType::VT_FRONT, self);
+        render = true;
+        break;
+      case '3':
+        self->SetViewOrbit(ViewType::VT_RIGHT, self);
+        render = true;
+        break;
+      case '7':
+        self->SetViewOrbit(ViewType::VT_TOP, self);
+        render = true;
+        break;
+      case '9':
+        self->SetViewOrbit(ViewType::VT_ISOMETRIC, self);
+        render = true;
+        break;
       default:
-        if (keySym == "Left")
-        {
-          self->AnimationManager.StopAnimation();
-          loader::LoadFileEnum load = loader::LoadFileEnum::LOAD_PREVIOUS;
-          self->Loader.loadFile(load);
-          render = true;
-        }
-        else if (keySym == "Right")
-        {
-          self->AnimationManager.StopAnimation();
-          loader::LoadFileEnum load = loader::LoadFileEnum::LOAD_NEXT;
-          self->Loader.loadFile(load);
-          render = true;
-        }
-        else if (keySym == "Up")
-        {
-          self->AnimationManager.StopAnimation();
-          loader::LoadFileEnum load = loader::LoadFileEnum::LOAD_CURRENT;
-          self->Loader.loadFile(load);
-          render = true;
-        }
-        else if (keySym == F3D_EXIT_HOTKEY_SYM)
+        if (keySym == F3D_EXIT_HOTKEY_SYM)
         {
           self->StopInteractor();
         }
@@ -264,7 +339,8 @@ public:
         }
         else if (keySym == "Space")
         {
-          self->AnimationManager.ToggleAnimation();
+          assert(self->AnimationManager);
+          self->AnimationManager->ToggleAnimation();
         }
         break;
     }
@@ -287,9 +363,10 @@ public:
     internals* self = static_cast<internals*>(clientData);
     vtkStringArray* filesArr = static_cast<vtkStringArray*>(callData);
     std::vector<std::string> filesVec;
+    filesVec.resize(filesArr->GetNumberOfTuples());
     for (int i = 0; i < filesArr->GetNumberOfTuples(); i++)
     {
-      filesVec.push_back(filesArr->GetValue(i));
+      filesVec[i] = filesArr->GetValue(i);
     }
 
     if (self->DropFilesUserCallBack(filesVec))
@@ -297,14 +374,21 @@ public:
       return;
     }
 
-    // No user defined behavior, use standard behavior
-    self->AnimationManager.StopAnimation();
-    for (std::string file : filesVec)
+    // No user defined behavior, load the first file
+    if (!filesVec.empty())
     {
-      self->Loader.addFile(file);
+      assert(self->AnimationManager);
+      self->AnimationManager->StopAnimation();
+      if (self->Loader.hasSceneReader(filesVec[0]))
+      {
+        self->Loader.loadScene(filesVec[0]);
+      }
+      else if (self->Loader.hasGeometryReader(filesVec[0]))
+      {
+        self->Loader.loadGeometry(filesVec[0], true);
+      }
+      self->Window.render();
     }
-    self->Loader.loadFile(loader::LoadFileEnum::LOAD_LAST);
-    self->Window.render();
   }
 
   static void OnMiddleButtonPress(vtkObject*, unsigned long, void* clientData, void*)
@@ -334,20 +418,15 @@ public:
 
       bool pickSuccessful = false;
       double picked[3];
-      self->CellPicker->Pick(x, y, 0, renderer);
-      if (self->CellPicker->GetActors()->GetNumberOfItems() > 0)
+      if (self->CellPicker->Pick(x, y, 0, renderer))
       {
         self->CellPicker->GetPickPosition(picked);
         pickSuccessful = true;
       }
-      else
+      else if (self->PointPicker->Pick(x, y, 0, renderer))
       {
-        self->PointPicker->Pick(x, y, 0, renderer);
-        if (self->PointPicker->GetActors()->GetNumberOfItems() > 0)
-        {
-          self->PointPicker->GetPickPosition(picked);
-          pickSuccessful = true;
-        }
+        self->PointPicker->GetPickPosition(picked);
+        pickSuccessful = true;
       }
 
       if (pickSuccessful)
@@ -358,58 +437,54 @@ public:
          *     .--.-----------------.picked
          * pos1    pos2
          */
-        camera& cam = self->Window.getCamera();
-        const point3_t pos = cam.getPosition();
-        const point3_t foc = cam.getFocalPoint();
+        const camera_state_t state = self->Window.getCamera().getState();
 
         double focV[3];
-        vtkMath::Subtract(picked, foc.data(), focV); /* foc -> picked */
+        vtkMath::Subtract(picked, state.foc.data(), focV); /* foc -> picked */
 
         double posV[3];
-        vtkMath::Subtract(picked, foc.data(), posV); /* pos -> pos1, parallel to focV */
+        vtkMath::Subtract(picked, state.foc.data(), posV); /* pos -> pos1, parallel to focV */
         if (!self->Style->GetInteractor()->GetShiftKey())
         {
           double v[3];
-          vtkMath::Subtract(foc.data(), pos.data(), v); /* pos -> foc */
-          vtkMath::ProjectVector(focV, v, v);           /* pos2 -> pos1 */
-          vtkMath::Subtract(posV, v, posV);             /* pos -> pos2, keeps on camera plane */
+          vtkMath::Subtract(state.foc.data(), state.pos.data(), v); /* pos -> foc */
+          vtkMath::ProjectVector(focV, v, v);                       /* pos2 -> pos1 */
+          vtkMath::Subtract(posV, v, posV); /* pos -> pos2, keeps on camera plane */
         }
 
-        if (self->TransitionDuration > 0)
+        const auto interpolateCameraState = [&state, &focV, &posV](double ratio) -> camera_state_t
         {
-          const auto start = std::chrono::high_resolution_clock::now();
-          const auto end = start + std::chrono::milliseconds(self->TransitionDuration);
-          auto now = start;
-          while (now < end)
-          {
-            const double t =
-              std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() /
-              static_cast<double>(self->TransitionDuration);
-            const double u = (1 - std::cos(vtkMath::Pi() * t)) / 2;
+          return { //
+            {
+              state.pos[0] + posV[0] * ratio,
+              state.pos[1] + posV[1] * ratio,
+              state.pos[2] + posV[2] * ratio,
+            },
+            {
+              state.foc[0] + focV[0] * ratio,
+              state.foc[1] + focV[1] * ratio,
+              state.foc[2] + focV[2] * ratio,
+            },
+            state.up, state.angle
+          };
+        };
 
-            cam.setFocalPoint({ foc[0] + focV[0] * u, foc[1] + focV[1] * u, foc[2] + focV[2] * u });
-            cam.setPosition({ pos[0] + posV[0] * u, pos[1] + posV[1] * u, pos[2] + posV[2] * u });
-            self->Window.render();
-
-            now = std::chrono::high_resolution_clock::now();
-          }
-        }
-
-        cam.setFocalPoint({ picked[0], picked[1], picked[2] });
-        cam.setPosition({ pos[0] + posV[0], pos[1] + posV[1], pos[2] + posV[2] });
-        self->Window.render();
+        self->AnimateCameraTransition(interpolateCameraState);
       }
     }
 
     self->Style->OnMiddleButtonUp();
   }
 
-  std::function<bool(int, std::string)> KeyPressUserCallBack = [](int, std::string)
+  std::function<bool(int, const std::string&)> KeyPressUserCallBack = [](int, const std::string&)
   { return false; };
-  std::function<bool(std::vector<std::string>)> DropFilesUserCallBack = [](std::vector<std::string>)
-  { return false; };
+  std::function<bool(const std::vector<std::string>&)> DropFilesUserCallBack =
+    [](const std::vector<std::string>&) { return false; };
 
-  void StartInteractor() { this->VTKInteractor->Start(); }
+  void StartInteractor()
+  {
+    this->VTKInteractor->Start();
+  }
 
   void StopInteractor()
   {
@@ -417,16 +492,49 @@ public:
     this->VTKInteractor->ExitCallback();
   }
 
+  /**
+   * Run a camera transition animation based on a camera state interpolation function.
+   * The provided function will be called with an interpolation parameter
+   * varying from `0.` for the initial state to `1.` for the final state;
+   * it shall return an appropriate linearly interpolated `camera_state_t` for any value in between.
+   */
+  template<class CameraStateInterpolator>
+  void AnimateCameraTransition(CameraStateInterpolator interpolateCameraState)
+  {
+    window& win = this->Window;
+    camera& cam = win.getCamera();
+    const int duration = this->TransitionDuration;
+
+    if (duration > 0)
+    {
+      // TODO implement a way to not queue key presses while the animation is running
+
+      const auto start = std::chrono::high_resolution_clock::now();
+      const auto end = start + std::chrono::milliseconds(duration);
+      auto now = start;
+      while (now < end)
+      {
+        const double timeDelta =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        const double ratio = (1 - std::cos(vtkMath::Pi() * (timeDelta / duration))) / 2;
+        cam.setState(interpolateCameraState(ratio));
+        this->Window.render();
+        now = std::chrono::high_resolution_clock::now();
+      }
+    }
+
+    cam.setState(interpolateCameraState(1.)); // ensure final update
+    this->Window.render();
+  }
+
   options& Options;
   window_impl& Window;
   loader_impl& Loader;
-  animationManager AnimationManager;
+  animationManager* AnimationManager;
 
   vtkNew<vtkRenderWindowInteractor> VTKInteractor;
   vtkNew<vtkF3DInteractorStyle> Style;
   vtkSmartPointer<vtkF3DInteractorEventRecorder> Recorder;
-  int WindowSize[2] = { -1, -1 };
-  int WindowPos[2] = { 0, 0 };
   std::map<unsigned long, std::pair<int, std::function<void()> > > TimerCallBacks;
 
   vtkNew<vtkCellPicker> CellPicker;
@@ -442,8 +550,8 @@ public:
 interactor_impl::interactor_impl(options& options, window_impl& window, loader_impl& loader)
   : Internals(std::make_unique<interactor_impl::internals>(options, window, loader))
 {
-  // Loader need the interactor
-  this->Internals->Loader.setInteractor(this);
+  // Loader need the interactor, loader will set the AnimationManager on the interactor
+  this->Internals->Loader.SetInteractor(this);
 }
 
 //----------------------------------------------------------------------------
@@ -497,25 +605,29 @@ unsigned long interactor_impl::createTimerCallBack(double time, std::function<vo
 //----------------------------------------------------------------------------
 void interactor_impl::toggleAnimation()
 {
-  this->Internals->AnimationManager.ToggleAnimation();
+  assert(this->Internals->AnimationManager);
+  this->Internals->AnimationManager->ToggleAnimation();
 }
 
 //----------------------------------------------------------------------------
 void interactor_impl::startAnimation()
 {
-  this->Internals->AnimationManager.StartAnimation();
+  assert(this->Internals->AnimationManager);
+  this->Internals->AnimationManager->StartAnimation();
 }
 
 //----------------------------------------------------------------------------
 void interactor_impl::stopAnimation()
 {
-  this->Internals->AnimationManager.StopAnimation();
+  assert(this->Internals->AnimationManager);
+  this->Internals->AnimationManager->StopAnimation();
 }
 
 //----------------------------------------------------------------------------
 bool interactor_impl::isPlayingAnimation()
 {
-  return this->Internals->AnimationManager.IsPlaying();
+  assert(this->Internals->AnimationManager);
+  return this->Internals->AnimationManager->IsPlaying();
 }
 
 //----------------------------------------------------------------------------
@@ -609,16 +721,15 @@ void interactor_impl::stop()
 }
 
 //----------------------------------------------------------------------------
-void interactor_impl::SetInteractorOn(vtkInteractorObserver* observer)
+void interactor_impl::SetAnimationManager(animationManager* manager)
 {
-  observer->SetInteractor(this->Internals->VTKInteractor);
+  this->Internals->AnimationManager = manager;
 }
 
 //----------------------------------------------------------------------------
-void interactor_impl::InitializeAnimation(vtkImporter* importer)
+void interactor_impl::SetInteractorOn(vtkInteractorObserver* observer)
 {
-  this->Internals->AnimationManager.Initialize(
-    &this->Internals->Options, this, &this->Internals->Window, importer);
+  observer->SetInteractor(this->Internals->VTKInteractor);
 }
 
 //----------------------------------------------------------------------------

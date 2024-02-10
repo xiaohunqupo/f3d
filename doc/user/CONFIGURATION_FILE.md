@@ -13,6 +13,7 @@ Using a command-line option will override the corresponding value in the config 
 The `global` block and command-line options are only taken into account on the first load
 and not on subsequent loads, when switching between files.
 The regular expression blocks are always taken into account, even when loading further files.
+Please note the regular expressions are not case-sensitive.
 
 A typical config file may look like this:
 
@@ -21,7 +22,7 @@ A typical config file may look like this:
    "global": {
        "bg-color": "0.7,0.7,0.7",
        "color": "0.5,0.1,0.1",
-       "fxaa": true,
+       "anti-aliasing": true,
        "timer": true,
        "progress": true,
        "axis": true,
@@ -59,7 +60,7 @@ The following command-line options <b> cannot </b> be set via config file:
 `help`, `version`, `readers-list`, `config`, `dry-run`.
 
 The following command-line options <b>can only</b> be set in the global block of the config file:
-`no-render`, `inputs`, `output`, `quiet`, `verbose`, `resolution`, `position` and all testing options.
+`no-render`, `inputs`, `output`, `verbose`, `resolution`, `position` and all testing options.
 
 Boolean options that have been turned on in the configuration file can be turned
 off on the command line if needed, eg: `--point-sprites=false`.
@@ -69,7 +70,7 @@ They are considered in the below order and only the first found will be used.
 
  * Linux: `${XDG_CONFIG_HOME}/.config/f3d/config(.json,.d)`, `~/.config/f3d/config(.json,d)`, `/etc/f3d/config(.json,.d)`, `/usr/share/f3d/configs/config(.json,.d)`, `[install_dir]/share/f3d/configs/config(.json,.d)`
  * Windows: `%APPDATA%\f3d\(config.json,.d)`, `[install_dir]\share\f3d\configs\(config.json,.d)`
- * macOS: `${XDG_CONFIG_HOME}/.config/f3d/config(.json,.d)`, `~/.config/f3d/config(.json,.d)`, `/usr/local/etc/f3d/config(.json,.d)`, `f3d.app/Contents/Resources/config(.json,.d)`
+ * macOS: `${XDG_CONFIG_HOME}/.config/f3d/config(.json,.d)`, `~/.config/f3d/config(.json,.d)`, `/usr/local/etc/f3d/config(.json,.d)`, `f3d.app/Contents/Resources/configs/config(.json,.d)`
 
 The binary release will install the default config directory.
 On Linux, they will be installed in `[install_dir]/share/f3d/configs/`, on Windows, they will be installed in `[install_dir]\share\f3d\configs\`, on macOS, it will be installed in the bundle.

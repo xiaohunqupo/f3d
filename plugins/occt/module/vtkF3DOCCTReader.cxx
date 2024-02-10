@@ -7,7 +7,10 @@
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BinTools.hxx>
 #include <IGESControl_Reader.hxx>
 #include <Message.hxx>
 #include <Message_PrinterOStream.hxx>
@@ -16,7 +19,9 @@
 #include <Poly_Triangulation.hxx>
 #include <Quantity_Color.hxx>
 #include <STEPControl_Reader.hxx>
+#include <Standard_Handle.hxx>
 #include <Standard_PrimitiveTypes.hxx>
+#include <Storage_StreamTypeMismatchError.hxx>
 #include <TColgp_Array1OfVec.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -68,7 +73,7 @@ class vtkF3DOCCTReader::vtkInternals
 {
 public:
   //----------------------------------------------------------------------------
-  vtkInternals(vtkF3DOCCTReader* parent)
+  explicit vtkInternals(vtkF3DOCCTReader* parent)
     : Parent(parent)
   {
   }
@@ -129,20 +134,24 @@ public:
           uvs->InsertNextTypedTuple(fn);
         }
 
-        std::vector<vtkIdType> polyline(nbV - 1);
+        std::vector<vtkIdType> polyline(nbV);
         std::iota(polyline.begin(), polyline.end(), shift);
         linesCells->InsertNextCell(polyline.size(), polyline.data());
 
 #if F3D_PLUGIN_OCCT_XCAF
-        std::array<unsigned char, 3> rgb = { 0, 0, 0 };
-        Quantity_Color aColor;
-        if (this->ColorTool->GetColor(edge, XCAFDoc_ColorCurv, aColor))
+        if (this->ColorTool)
         {
-          rgb[0] = static_cast<unsigned char>(255.0 * aColor.Red());
-          rgb[1] = static_cast<unsigned char>(255.0 * aColor.Green());
-          rgb[2] = static_cast<unsigned char>(255.0 * aColor.Blue());
+          std::array<unsigned char, 3> rgb = { 0, 0, 0 };
+          Quantity_Color aColor;
+          if (this->ColorTool->GetColor(edge, XCAFDoc_ColorCurv, aColor) ||
+            this->ColorTool->GetColor(shape, XCAFDoc_ColorCurv, aColor))
+          {
+            rgb[0] = static_cast<unsigned char>(255.0 * aColor.Red());
+            rgb[1] = static_cast<unsigned char>(255.0 * aColor.Green());
+            rgb[2] = static_cast<unsigned char>(255.0 * aColor.Blue());
+          }
+          colors->InsertNextTypedTuple(rgb.data());
         }
-        colors->InsertNextTypedTuple(rgb.data());
 #endif
 
         shift += nbV;
@@ -220,11 +229,8 @@ public:
       }
       else
       {
-        float fn[3] = { 0.0, 0.0 };
-        for (Standard_Integer i = 1; i <= nbV; i++)
-        {
-          uvs->InsertNextTypedTuple(fn);
-        }
+        uvs->SetNumberOfTuples(nbV);
+        uvs->Fill(0.0);
       }
 
       for (int i = 1; i <= nbT; i++)
@@ -240,15 +246,19 @@ public:
         trianglesCells->InsertNextCell(3, cell);
 
 #if F3D_PLUGIN_OCCT_XCAF
-        std::array<unsigned char, 3> rgb = { 255, 255, 255 };
-        Quantity_Color aColor;
-        if (this->ColorTool->GetColor(face, XCAFDoc_ColorSurf, aColor))
+        if (this->ColorTool)
         {
-          rgb[0] = static_cast<unsigned char>(255.0 * aColor.Red());
-          rgb[1] = static_cast<unsigned char>(255.0 * aColor.Green());
-          rgb[2] = static_cast<unsigned char>(255.0 * aColor.Blue());
+          std::array<unsigned char, 3> rgb = { 255, 255, 255 };
+          Quantity_Color aColor;
+          if (this->ColorTool->GetColor(face, XCAFDoc_ColorSurf, aColor) ||
+            this->ColorTool->GetColor(shape, XCAFDoc_ColorSurf, aColor))
+          {
+            rgb[0] = static_cast<unsigned char>(255.0 * aColor.Red());
+            rgb[1] = static_cast<unsigned char>(255.0 * aColor.Green());
+            rgb[2] = static_cast<unsigned char>(255.0 * aColor.Blue());
+          }
+          colors->InsertNextTypedTuple(rgb.data());
         }
-        colors->InsertNextTypedTuple(rgb.data());
 #endif
       }
 
@@ -263,7 +273,11 @@ public:
     polydata->SetLines(linesCells);
 
 #if F3D_PLUGIN_OCCT_XCAF
-    polydata->GetCellData()->SetScalars(colors);
+    /* colors may be left empty if this->ColorTool has not been initialized */
+    if (colors->GetSize() > 0)
+    {
+      polydata->GetCellData()->SetScalars(colors);
+    }
 #endif
 
     polydata->Squeeze();
@@ -412,7 +426,10 @@ vtkF3DOCCTReader::~vtkF3DOCCTReader() = default;
 class ProgressIndicator : public Message_ProgressIndicator
 {
 public:
-  ProgressIndicator(vtkF3DOCCTReader* reader) { this->Reader = reader; }
+  explicit ProgressIndicator(vtkF3DOCCTReader* reader)
+  {
+    this->Reader = reader;
+  }
 
 protected:
   void Show(const Message_ProgressScope&, const Standard_Boolean) override
@@ -460,6 +477,40 @@ int vtkF3DOCCTReader::RequestData(
   vtkMultiBlockDataSet* output = vtkMultiBlockDataSet::GetData(outputVector);
 
   Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+
+  if (this->FileFormat == FILE_FORMAT::BREP)
+  {
+    TopoDS_Shape shape;
+    ProgressIndicator pIndicator(this);
+    const Message_ProgressRange pRange = pIndicator.Start();
+
+    bool success = false;
+    try
+    {
+      success = BinTools::Read(shape, this->GetFileName().c_str(), pRange);
+    }
+    catch (Storage_StreamTypeMismatchError&)
+    {
+      const BRep_Builder builder;
+      success = BRepTools::Read(shape, this->GetFileName().c_str(), builder, pRange);
+    }
+
+    if (success)
+    {
+      output->SetNumberOfBlocks(1);
+      const vtkSmartPointer<vtkPolyData> polydata = this->Internals->CreateShape(shape);
+      if (polydata && polydata->GetNumberOfCells() > 0)
+      {
+        output->SetBlock(1, polydata);
+      }
+      return 1;
+    }
+    else
+    {
+      vtkErrorWithObjectMacro(this, "Failed opening file " << this->GetFileName());
+      return 0;
+    }
+  }
 
 #if F3D_PLUGIN_OCCT_XCAF
   Handle(TDocStd_Document) doc;
@@ -552,6 +603,12 @@ void vtkF3DOCCTReader::PrintSelf(ostream& os, vtkIndent indent)
   os << indent << "AngularDeflection: " << this->AngularDeflection << "\n";
   os << indent << "RelativeDeflection: " << (this->RelativeDeflection ? "true" : "false") << "\n";
   os << indent << "ReadWire: " << (this->ReadWire ? "true" : "false") << "\n";
-  os << indent << "FileFormat: " << (this->FileFormat == FILE_FORMAT::STEP ? "STEP" : "IGES")
-     << "\n";
+  // clang-format off
+  switch (this->FileFormat)
+  {
+    case FILE_FORMAT::BREP: os << "FileFormat: BREP" << "\n"; break;
+    case FILE_FORMAT::STEP: os << "FileFormat: STEP" << "\n"; break;
+    case FILE_FORMAT::IGES: os << "FileFormat: IGES" << "\n"; break;
+  }
+  // clang-format
 }

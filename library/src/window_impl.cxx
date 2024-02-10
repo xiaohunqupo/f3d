@@ -31,7 +31,7 @@ namespace f3d::detail
 class window_impl::internals
 {
 public:
-  internals(const options& options)
+  explicit internals(const options& options)
     : Options(options)
   {
   }
@@ -46,10 +46,11 @@ public:
 
   std::unique_ptr<camera_impl> Camera;
   vtkSmartPointer<vtkRenderWindow> RenWin;
-  vtkSmartPointer<vtkF3DRenderer> Renderer;
+  vtkNew<vtkF3DRendererWithColoring> Renderer;
   Type WindowType;
   const options& Options;
   bool Initialized = false;
+  bool WithColoring = false;
   std::string CachePath;
 };
 
@@ -83,8 +84,10 @@ window_impl::window_impl(const options& options, Type type)
     this->Internals->RenWin->SetWindowInfo("jni");
 #endif
   }
-
+  this->Internals->RenWin->SetWindowName("f3d");
+  this->Internals->RenWin->AddRenderer(this->Internals->Renderer);
   this->Internals->Camera = std::make_unique<detail::camera_impl>();
+  this->Internals->Camera->SetVTKRenderer(this->Internals->Renderer);
 }
 
 //----------------------------------------------------------------------------
@@ -100,7 +103,7 @@ camera& window_impl::getCamera()
   // is initialized before providing one.
   if (!this->Internals->Initialized)
   {
-    this->Initialize(false, "");
+    this->Initialize(false);
   }
 
   return *this->Internals->Camera;
@@ -201,57 +204,30 @@ point3_t window_impl::getDisplayFromWorld(const point3_t& worldPoint) const
 //----------------------------------------------------------------------------
 window_impl::~window_impl()
 {
-  if (this->Internals->Renderer)
-  {
-    // The axis widget should be disabled before calling the renderer destructor
-    // As there is a register loop if not
-    this->Internals->Renderer->ShowAxis(false);
-  }
+  // The axis widget should be disabled before calling the renderer destructor
+  // As there is a register loop if not
+  this->Internals->Renderer->ShowAxis(false);
 }
 
 //----------------------------------------------------------------------------
-void window_impl::Initialize(bool withColoring, std::string fileInfo)
+void window_impl::Initialize(bool withColoring)
 {
-  // Clear renderer if already present
-  if (this->Internals->Renderer)
-  {
-    // Hide axis to make sure the renderer can be deleted if needed
-    this->Internals->Renderer->ShowAxis(false);
-    this->Internals->RenWin->RemoveRenderer(this->Internals->Renderer);
-  }
-
-  vtkF3DRendererWithColoring* renWithColor =
-    vtkF3DRendererWithColoring::SafeDownCast(this->Internals->Renderer);
-
-  // Create the renderer only when needed
-  // Note: a vtkF3DRendererWithColoring could always be used instead of switching
-  // but it seems more efficient this way
-  if (withColoring && !renWithColor)
-  {
-    this->Internals->Renderer = vtkSmartPointer<vtkF3DRendererWithColoring>::New();
-  }
-  else if (!withColoring && (renWithColor || !this->Internals->Renderer))
-  {
-    this->Internals->Renderer = vtkSmartPointer<vtkF3DRenderer>::New();
-  }
-
-  this->Internals->Renderer->SetCachePath(this->Internals->GetCachePath());
-
-  this->Internals->Camera->SetVTKRenderer(this->Internals->Renderer);
-  this->Internals->RenWin->AddRenderer(this->Internals->Renderer);
-  this->Internals->Renderer->Initialize(
-    fileInfo, this->Internals->Options.getAsString("scene.up-direction"));
+  this->Internals->WithColoring = withColoring;
+  this->Internals->Renderer->Initialize(this->Internals->Options.getAsString("scene.up-direction"));
   this->Internals->Initialized = true;
 }
 
 //----------------------------------------------------------------------------
 void window_impl::UpdateDynamicOptions()
 {
-  if (!this->Internals->Renderer)
+  if (!this->Internals->Initialized)
   {
     // Renderer is missing, create a default one
-    this->Initialize(false, "");
+    this->Initialize(false);
   }
+
+  // Set the cache path if not already
+  this->Internals->Renderer->SetCachePath(this->Internals->GetCachePath());
 
   // Make sure lights are created before we take options into account
   this->Internals->Renderer->UpdateLights();
@@ -259,16 +235,31 @@ void window_impl::UpdateDynamicOptions()
   this->Internals->Renderer->ShowAxis(this->Internals->Options.getAsBool("interactor.axis"));
   this->Internals->Renderer->SetUseTrackball(
     this->Internals->Options.getAsBool("interactor.trackball"));
+  this->Internals->Renderer->SetInvertZoom(
+    this->Internals->Options.getAsBool("interactor.invert-zoom"));
+
+  std::string splatTypeStr = this->Internals->Options.getAsString("render.splat-type");
+  int pointSize = this->Internals->Options.getAsDouble("render.point-size");
+  vtkF3DRendererWithColoring::SplatType splatType = vtkF3DRendererWithColoring::SplatType::SPHERE;
+  if (splatTypeStr == "gaussian")
+  {
+    splatType = vtkF3DRendererWithColoring::SplatType::GAUSSIAN;
+  }
+
+  this->Internals->Renderer->SetPointProperties(splatType, pointSize);
 
   this->Internals->Renderer->SetLineWidth(
     this->Internals->Options.getAsDouble("render.line-width"));
-  this->Internals->Renderer->SetPointSize(
-    this->Internals->Options.getAsDouble("render.point-size"));
   this->Internals->Renderer->ShowEdge(this->Internals->Options.getAsBool("render.show-edges"));
   this->Internals->Renderer->ShowTimer(this->Internals->Options.getAsBool("ui.fps"));
   this->Internals->Renderer->ShowFilename(this->Internals->Options.getAsBool("ui.filename"));
+  this->Internals->Renderer->SetFilenameInfo(
+    this->Internals->Options.getAsString("ui.filename-info"));
   this->Internals->Renderer->ShowMetaData(this->Internals->Options.getAsBool("ui.metadata"));
   this->Internals->Renderer->ShowCheatSheet(this->Internals->Options.getAsBool("ui.cheatsheet"));
+  this->Internals->Renderer->ShowDropZone(this->Internals->Options.getAsBool("ui.dropzone"));
+  this->Internals->Renderer->SetDropZoneInfo(
+    this->Internals->Options.getAsString("ui.dropzone-info"));
 
   this->Internals->Renderer->SetUseRaytracing(
     this->Internals->Options.getAsBool("render.raytracing.enable"));
@@ -278,13 +269,13 @@ void window_impl::UpdateDynamicOptions()
     this->Internals->Options.getAsBool("render.raytracing.denoise"));
 
   this->Internals->Renderer->SetUseSSAOPass(
-    this->Internals->Options.getAsBool("render.effect.ssao"));
+    this->Internals->Options.getAsBool("render.effect.ambient-occlusion"));
   this->Internals->Renderer->SetUseFXAAPass(
-    this->Internals->Options.getAsBool("render.effect.fxaa"));
+    this->Internals->Options.getAsBool("render.effect.anti-aliasing"));
   this->Internals->Renderer->SetUseToneMappingPass(
     this->Internals->Options.getAsBool("render.effect.tone-mapping"));
   this->Internals->Renderer->SetUseDepthPeelingPass(
-    this->Internals->Options.getAsBool("render.effect.depth-peeling"));
+    this->Internals->Options.getAsBool("render.effect.translucency-support"));
 
   this->Internals->Renderer->SetBackground(
     this->Internals->Options.getAsDoubleVector("render.background.color").data());
@@ -292,39 +283,78 @@ void window_impl::UpdateDynamicOptions()
     this->Internals->Options.getAsBool("render.background.blur"));
   this->Internals->Renderer->SetBlurCircleOfConfusionRadius(
     this->Internals->Options.getAsDouble("render.background.blur.coc"));
-  this->Internals->Renderer->SetHDRIFile(
-    this->Internals->Options.getAsString("render.background.hdri"));
   this->Internals->Renderer->SetLightIntensity(
     this->Internals->Options.getAsDouble("render.light.intensity"));
 
+  std::string hdriFile = this->Internals->Options.getAsString("render.hdri.file");
+  bool hdriAmbient = this->Internals->Options.getAsBool("render.hdri.ambient");
+  bool hdriSkybox = this->Internals->Options.getAsBool("render.background.skybox");
+#ifndef F3D_NO_DEPRECATED
+  std::string legacyHDRI = this->Internals->Options.getAsString("render.background.hdri");
+  if (!legacyHDRI.empty())
+  {
+    hdriFile = legacyHDRI;
+    hdriAmbient = true;
+    hdriSkybox = true;
+  }
+#endif
+  this->Internals->Renderer->SetHDRIFile(hdriFile);
+  this->Internals->Renderer->SetUseImageBasedLighting(hdriAmbient);
+  this->Internals->Renderer->ShowHDRISkybox(hdriSkybox);
+
   this->Internals->Renderer->SetFontFile(this->Internals->Options.getAsString("ui.font-file"));
 
-  vtkF3DRendererWithColoring* renWithColor =
-    vtkF3DRendererWithColoring::SafeDownCast(this->Internals->Renderer);
+  this->Internals->Renderer->SetGridUnitSquare(
+    this->Internals->Options.getAsDouble("render.grid.unit"));
+  this->Internals->Renderer->SetGridSubdivisions(
+    this->Internals->Options.getAsInt("render.grid.subdivisions"));
+  this->Internals->Renderer->SetGridAbsolute(
+    this->Internals->Options.getAsBool("render.grid.absolute"));
+  this->Internals->Renderer->ShowGrid(this->Internals->Options.getAsBool("render.grid.enable"));
 
-  if (renWithColor)
+  if (this->Internals->WithColoring)
   {
-    renWithColor->SetColoring(this->Internals->Options.getAsBool("model.scivis.cells"),
+    this->Internals->Renderer->SetSurfaceColor(
+      this->Internals->Options.getAsDoubleVector("model.color.rgb").data());
+    this->Internals->Renderer->SetOpacity(
+      this->Internals->Options.getAsDouble("model.color.opacity"));
+    this->Internals->Renderer->SetTextureBaseColor(
+      this->Internals->Options.getAsString("model.color.texture"));
+    this->Internals->Renderer->SetRoughness(
+      this->Internals->Options.getAsDouble("model.material.roughness"));
+    this->Internals->Renderer->SetMetallic(
+      this->Internals->Options.getAsDouble("model.material.metallic"));
+    this->Internals->Renderer->SetTextureMaterial(
+      this->Internals->Options.getAsString("model.material.texture"));
+    this->Internals->Renderer->SetTextureEmissive(
+      this->Internals->Options.getAsString("model.emissive.texture"));
+    this->Internals->Renderer->SetEmissiveFactor(
+      this->Internals->Options.getAsDoubleVector("model.emissive.factor").data());
+    this->Internals->Renderer->SetTextureNormal(
+      this->Internals->Options.getAsString("model.normal.texture"));
+    this->Internals->Renderer->SetNormalScale(
+      this->Internals->Options.getAsDouble("model.normal.scale"));
+    this->Internals->Renderer->SetTextureMatCap(
+      this->Internals->Options.getAsString("model.matcap.texture"));
+
+    this->Internals->Renderer->SetColoring(this->Internals->Options.getAsBool("model.scivis.cells"),
       this->Internals->Options.getAsString("model.scivis.array-name"),
       this->Internals->Options.getAsInt("model.scivis.component"));
-    renWithColor->SetScalarBarRange(
+    this->Internals->Renderer->SetScalarBarRange(
       this->Internals->Options.getAsDoubleVector("model.scivis.range"));
-    renWithColor->SetColormap(this->Internals->Options.getAsDoubleVector("model.scivis.colormap"));
-    renWithColor->ShowScalarBar(this->Internals->Options.getAsBool("ui.bar"));
+    this->Internals->Renderer->SetColormap(
+      this->Internals->Options.getAsDoubleVector("model.scivis.colormap"));
+    this->Internals->Renderer->ShowScalarBar(this->Internals->Options.getAsBool("ui.bar"));
 
-    renWithColor->SetUsePointSprites(
+    this->Internals->Renderer->SetUsePointSprites(
       this->Internals->Options.getAsBool("model.point-sprites.enable"));
-    renWithColor->SetUseVolume(this->Internals->Options.getAsBool("model.volume.enable"));
-    renWithColor->SetUseInverseOpacityFunction(
+    this->Internals->Renderer->SetUseVolume(
+      this->Internals->Options.getAsBool("model.volume.enable"));
+    this->Internals->Renderer->SetUseInverseOpacityFunction(
       this->Internals->Options.getAsBool("model.volume.inverse"));
-
-    renWithColor->UpdateColoringActors();
   }
 
-  // Show grid last as it needs to know the bounding box to be able to compute its size
-  this->Internals->Renderer->ShowGrid(this->Internals->Options.getAsBool("render.grid.enable"),
-    this->Internals->Options.getAsDouble("render.grid.unit"),
-    this->Internals->Options.getAsInt("render.grid.subdivisions"));
+  this->Internals->Renderer->UpdateActors();
 }
 
 //----------------------------------------------------------------------------
@@ -336,11 +366,13 @@ void window_impl::PrintSceneDescription(log::VerboseLevel level)
 //----------------------------------------------------------------------------
 void window_impl::PrintColoringDescription(log::VerboseLevel level)
 {
-  vtkF3DRendererWithColoring* renWithColor =
-    vtkF3DRendererWithColoring::SafeDownCast(this->Internals->Renderer);
-  if (renWithColor)
+  if (this->Internals->WithColoring)
   {
-    log::print(level, renWithColor->GetColoringDescription());
+    std::string descr = this->Internals->Renderer->GetColoringDescription();
+    if (!descr.empty())
+    {
+      log::print(level, descr);
+    }
   }
 }
 
@@ -381,31 +413,18 @@ image window_impl::renderToImage(bool noBackground)
   int* dims = exporter->GetDataDimensions();
   int cmp = exporter->GetDataNumberOfScalarComponents();
 
-  image output;
-  output.setResolution(dims[0], dims[1]);
-  output.setChannelCount(cmp);
-
-  exporter->Export(output.getData());
+  image output(dims[0], dims[1], cmp);
+  exporter->Export(output.getContent());
 
   return output;
 }
 
 //----------------------------------------------------------------------------
-void window_impl::InitializeRendererWithColoring(vtkF3DGenericImporter* importer)
+void window_impl::SetImporterForColoring(vtkF3DGenericImporter* importer)
 {
-  vtkF3DRendererWithColoring* renWithColor =
-    vtkF3DRendererWithColoring::SafeDownCast(this->Internals->Renderer);
-  if (renWithColor && importer)
+  if (this->Internals->WithColoring)
   {
-    renWithColor->SetScalarBarActor(importer->GetScalarBarActor());
-    renWithColor->SetGeometryActor(importer->GetGeometryActor());
-    renWithColor->SetPointSpritesActor(importer->GetPointSpritesActor());
-    renWithColor->SetVolumeProp(importer->GetVolumeProp());
-    renWithColor->SetPolyDataMapper(importer->GetPolyDataMapper());
-    renWithColor->SetPointGaussianMapper(importer->GetPointGaussianMapper());
-    renWithColor->SetVolumeMapper(importer->GetVolumeMapper());
-    renWithColor->SetColoringAttributes(
-      importer->GetPointDataForColoring(), importer->GetCellDataForColoring());
+    this->Internals->Renderer->SetImporter(importer);
   }
 }
 

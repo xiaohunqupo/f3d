@@ -1,9 +1,14 @@
 #include "options.h"
 
+#include "export.h"
+#include "init.h"
 #include "log.h"
+#include "utils.h"
 
 #include "vtkF3DConfigure.h"
 
+#include <algorithm>
+#include <limits>
 #include <map>
 #include <type_traits>
 #include <variant>
@@ -38,6 +43,12 @@ public:
     static_assert(!std::is_array_v<T> && !std::is_pointer_v<T>);
     try
     {
+#ifndef F3D_NO_DEPRECATED
+      if (this->IsDeprecated(name))
+      {
+        log::warn("Option ", name, " is deprecated");
+      }
+#endif
       T& opt = std::get<T>(this->Options.at(name));
       opt = value;
     }
@@ -47,7 +58,7 @@ public:
     }
     catch (const std::out_of_range&)
     {
-      log::error("Options ", name, " does not exist");
+      log::error("Option ", name, " does not exist");
     }
   }
 
@@ -65,7 +76,7 @@ public:
     }
     catch (const std::out_of_range&)
     {
-      log::error("Options ", name, " does not exist");
+      log::error("Option ", name, " does not exist");
       return;
     }
   }
@@ -83,21 +94,35 @@ public:
   {
     try
     {
+#ifndef F3D_NO_DEPRECATED
+      if (this->IsDeprecated(name))
+      {
+        log::warn("Option ", name, " is deprecated");
+      }
+#endif
       return std::get<T>(this->Options.at(name));
     }
     catch (const std::bad_variant_access&)
     {
-      std::string error = "Trying to get option reference " + name + " with incompatible type";
-      log::error(error);
-      throw options::incompatible_exception(error + "\n");
+      throw options::incompatible_exception(
+        "Trying to get option reference " + name + " with incompatible type");
     }
     catch (const std::out_of_range&)
     {
-      std::string error = "Options " + name + " does not exist";
-      log::error(error);
-      throw options::inexistent_exception(error + "\n");
+      throw options::inexistent_exception("Option " + name + " does not exist");
     }
   }
+
+#ifndef F3D_NO_DEPRECATED
+  bool IsDeprecated(const std::string& name)
+  {
+    // compile time list of deprecated options
+    constexpr std::string_view deprecated[] = { "render.background.hdri" };
+
+    auto it = std::find(std::begin(deprecated), std::end(deprecated), name);
+    return it != std::end(deprecated);
+  }
+#endif
 
   std::map<std::string, OptionVariant> Options;
 };
@@ -106,17 +131,24 @@ public:
 options::options()
   : Internals(new options::internals)
 {
+  detail::init::initialize();
+
   // Scene
+  this->Internals->init("scene.animation.autoplay", false);
   this->Internals->init("scene.animation.index", 0);
+  this->Internals->init("scene.animation.speed-factor", 1.0);
+  this->Internals->init("scene.animation.time", 0.0);
+  this->Internals->init("scene.animation.frame-rate", 60.0);
   this->Internals->init("scene.camera.index", -1);
-  this->Internals->init("scene.geometry-only", false);
   this->Internals->init("scene.up-direction", std::string("+Y"));
 
   // Render
   this->Internals->init("render.show-edges", false);
   this->Internals->init("render.line-width", 1.0);
   this->Internals->init("render.point-size", 10.0);
+  this->Internals->init("render.splat-type", std::string("sphere"));
   this->Internals->init("render.grid.enable", false);
+  this->Internals->init("render.grid.absolute", false);
   this->Internals->init("render.grid.unit", 0.0);
   this->Internals->init("render.grid.subdivisions", 10);
 
@@ -124,14 +156,18 @@ options::options()
   this->Internals->init("render.raytracing.denoise", false);
   this->Internals->init("render.raytracing.samples", 5);
 
-  this->Internals->init("render.effect.depth-peeling", false);
-  this->Internals->init("render.effect.fxaa", false);
-  this->Internals->init("render.effect.ssao", false);
+  this->Internals->init("render.effect.translucency-support", false);
+  this->Internals->init("render.effect.anti-aliasing", false);
+  this->Internals->init("render.effect.ambient-occlusion", false);
   this->Internals->init("render.effect.tone-mapping", false);
 
+  this->Internals->init("render.hdri.file", std::string());
+  this->Internals->init("render.hdri.ambient", false);
   this->Internals->init("render.background.color", std::vector<double>{ 0.2, 0.2, 0.2 });
-  this->Internals->init(
-    "render.background.hdri", std::string()); // XXX This overrides background.color
+#ifndef F3D_NO_DEPRECATED
+  this->Internals->init("render.background.hdri", std::string());
+#endif
+  this->Internals->init("render.background.skybox", false);
   this->Internals->init("render.background.blur", false);
   this->Internals->init("render.background.blur.coc", 20.0);
   this->Internals->init("render.light.intensity", 1.);
@@ -139,13 +175,18 @@ options::options()
   // UI
   this->Internals->init("ui.bar", false);
   this->Internals->init("ui.filename", false);
+  this->Internals->init("ui.filename-info", std::string());
   this->Internals->init("ui.fps", false);
   this->Internals->init("ui.cheatsheet", false);
+  this->Internals->init("ui.dropzone", false);
+  this->Internals->init("ui.dropzone-info", std::string());
   this->Internals->init("ui.metadata", false);
   this->Internals->init("ui.font-file", std::string());
   this->Internals->init("ui.loader-progress", false);
 
   // Model
+  this->Internals->init("model.matcap.texture", std::string());
+
   this->Internals->init("model.color.opacity", 1.0);
   // XXX: Not compatible with scivis: https://github.com/f3d-app/f3d/issues/347
   this->Internals->init("model.color.rgb", std::vector<double>{ 1., 1., 1. });
@@ -178,6 +219,7 @@ options::options()
   // Interactor
   this->Internals->init("interactor.axis", false);
   this->Internals->init("interactor.trackball", false);
+  this->Internals->init("interactor.invert-zoom", false);
 };
 
 //----------------------------------------------------------------------------
@@ -432,11 +474,34 @@ options& options::copy(const options& from, const std::string& name)
 std::vector<std::string> options::getNames()
 {
   std::vector<std::string> names;
-  for (const auto& [name, _] : this->Internals->Options)
+  names.reserve(this->Internals->Options.size());
+  for (const auto& [name, value] : this->Internals->Options)
   {
     names.emplace_back(name);
   }
   return names;
+}
+
+//----------------------------------------------------------------------------
+std::pair<std::string, unsigned int> options::getClosestOption(const std::string& option) const
+{
+  if (this->Internals->Options.find(option) != this->Internals->Options.end())
+  {
+    return { option, 0 };
+  }
+
+  std::pair<std::string, int> ret = { "", std::numeric_limits<int>::max() };
+
+  for (const auto& [name, value] : this->Internals->Options)
+  {
+    int distance = utils::textDistance(name, option);
+    if (distance < ret.second)
+    {
+      ret = { name, distance };
+    }
+  }
+
+  return ret;
 }
 
 //----------------------------------------------------------------------------

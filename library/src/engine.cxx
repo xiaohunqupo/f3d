@@ -1,7 +1,7 @@
 #include "engine.h"
 
 #include "config.h"
-#include "init.h" // This includes is needed on mac so that the global variable is created
+#include "init.h"
 #include "interactor_impl.h"
 #include "loader_impl.h"
 #include "log.h"
@@ -14,9 +14,12 @@
 
 #include <vtkVersion.h>
 
+#include <vtksys/Directory.hxx>
 #include <vtksys/DynamicLoader.hxx>
 #include <vtksys/Encoding.hxx>
 #include <vtksys/SystemTools.hxx>
+
+#include <nlohmann/json.hpp>
 
 namespace f3d
 {
@@ -33,6 +36,9 @@ public:
 engine::engine(window::Type windowType)
   : Internals(new engine::internals)
 {
+  // Ensure all lib initialization is done (once)
+  detail::init::initialize();
+
   // build default cache path
 #if defined(_WIN32)
   std::string cachePath = vtksys::SystemTools::GetEnv("LOCALAPPDATA");
@@ -119,20 +125,38 @@ interactor& engine::getInteractor()
 }
 
 //----------------------------------------------------------------------------
-void engine::loadPlugin(const std::string& pathOrName)
+void engine::loadPlugin(const std::string& pathOrName, const std::vector<std::string>& searchPaths)
 {
-  // check if the plugin is a known static plugin
-  factory* factory = factory::instance();
-  factory::plugin_initializer_t init_plugin = factory->getStaticInitializer(pathOrName);
+  if (pathOrName.empty())
+  {
+    return;
+  }
 
-  vtksys::DynamicLoader::LibraryHandle handle = nullptr;
+  std::string pluginOrigin = "static";
+  factory* factory = factory::instance();
+
+  // check if the plugin is already loaded
+  for (auto* plug : factory->getPlugins())
+  {
+    if (plug->getName() == pathOrName || plug->getOrigin() == pathOrName)
+    {
+      log::debug("Plugin \"", pathOrName, "\" already loaded");
+      return;
+    }
+  }
+
+  // check if the plugin is a known static plugin
+  factory::plugin_initializer_t init_plugin = factory->getStaticInitializer(pathOrName);
 
   if (init_plugin == nullptr)
   {
+    vtksys::DynamicLoader::LibraryHandle handle = nullptr;
+
     std::string fullPath = vtksys::SystemTools::CollapseFullPath(pathOrName);
     if (vtksys::SystemTools::FileExists(fullPath))
     {
       // plugin provided as full path
+      log::debug("Trying to load plugin from: \"", fullPath, "\"");
       handle = vtksys::DynamicLoader::OpenLibrary(fullPath);
 
       if (!handle)
@@ -140,35 +164,53 @@ void engine::loadPlugin(const std::string& pathOrName)
         throw engine::plugin_exception(
           "Cannot open the library \"" + fullPath + "\": " + vtksys::DynamicLoader::LastError());
       }
+      else
+      {
+        pluginOrigin = fullPath;
+      }
     }
     else
     {
-      std::string libName;
-
-      // Right now, plugins should be located in the same folder than f3d.exe on Windows
-      // On Linux/macOS, when we are not using a full path, we rely on LD_LIBRARY_PATH
-#ifdef _WIN32
-      std::vector<wchar_t> pathBuf(40000);
-      if (GetModuleFileNameW(
-            GetModuleHandle(nullptr), pathBuf.data(), static_cast<DWORD>(pathBuf.size())))
-      {
-        std::string progPath =
-          vtksys::SystemTools::GetProgramPath(vtksys::Encoding::ToNarrow(pathBuf.data()));
-        libName = vtksys::SystemTools::ConvertToWindowsOutputPath(progPath) + "\\";
-      }
-#endif
-
       // construct the library file name from the plugin name
-      libName += vtksys::DynamicLoader::LibPrefix();
+      std::string libName = vtksys::DynamicLoader::LibPrefix();
       libName += "f3d-plugin-";
       libName += pathOrName;
       libName += vtksys::DynamicLoader::LibExtension();
 
-      handle = vtksys::DynamicLoader::OpenLibrary(libName);
+      // try search paths
+      for (std::string tryPath : searchPaths)
+      {
+        tryPath += '/';
+        tryPath += libName;
+        tryPath = vtksys::SystemTools::ConvertToOutputPath(tryPath);
+        if (vtksys::SystemTools::FileExists(tryPath))
+        {
+          log::debug("Trying to load \"", pathOrName, "\" plugin from: \"", tryPath, "\"");
+          handle = vtksys::DynamicLoader::OpenLibrary(tryPath);
+
+          if (handle)
+          {
+            // plugin is found and loaded
+            pluginOrigin = tryPath;
+            break;
+          }
+        }
+      }
+
       if (!handle)
       {
-        throw engine::plugin_exception(
-          "Cannot open the library \"" + pathOrName + "\": " + vtksys::DynamicLoader::LastError());
+        // Rely on internal system (e.g. LD_LIBRARY_PATH on Linux) by giving only the file name
+        log::debug("Trying to load plugin relying on internal system: ", libName);
+        handle = vtksys::DynamicLoader::OpenLibrary(libName);
+        if (!handle)
+        {
+          throw engine::plugin_exception("Cannot open the library \"" + pathOrName +
+            "\": " + vtksys::DynamicLoader::LastError());
+        }
+        else
+        {
+          pluginOrigin = "system";
+        }
       }
     }
 
@@ -181,9 +223,10 @@ void engine::loadPlugin(const std::string& pathOrName)
     }
   }
 
-  plugin* p = init_plugin();
-
-  factory->load(p);
+  plugin* plug = init_plugin();
+  plug->setOrigin(pluginOrigin);
+  factory->load(plug);
+  log::debug("Loaded plugin ", plug->getName(), " from: \"", plug->getOrigin(), "\"");
 }
 
 //----------------------------------------------------------------------------
@@ -193,10 +236,51 @@ void engine::autoloadPlugins()
 }
 
 //----------------------------------------------------------------------------
+std::vector<std::string> engine::getPluginsList(const std::string& pluginPath)
+{
+  vtksys::Directory dir;
+  constexpr std::string_view ext = ".json";
+  std::vector<std::string> pluginNames;
+
+  if (dir.Load(pluginPath))
+  {
+    for (unsigned long i = 0; i < dir.GetNumberOfFiles(); i++)
+    {
+      std::string currentFile = dir.GetFile(i);
+      if (std::equal(ext.rbegin(), ext.rend(), currentFile.rbegin()))
+      {
+        std::string fullPath = dir.GetPath();
+        fullPath += "/";
+        fullPath += currentFile;
+
+        try
+        {
+          auto root = nlohmann::json::parse(std::ifstream(fullPath));
+
+          auto name = root.find("name");
+
+          if (name != root.end() && name.value().is_string())
+          {
+            pluginNames.push_back(name.value().get<std::string>());
+          }
+        }
+        catch (const nlohmann::json::parse_error& ex)
+        {
+          log::warn(fullPath, " is not a valid JSON file: ", ex.what());
+        }
+      }
+    }
+  }
+
+  return pluginNames;
+}
+
+//----------------------------------------------------------------------------
 engine::libInformation engine::getLibInfo()
 {
   libInformation libInfo;
   libInfo.Version = detail::LibVersion;
+  libInfo.VersionFull = detail::LibVersionFull;
   libInfo.BuildDate = detail::LibBuildDate;
   libInfo.BuildSystem = detail::LibBuildSystem;
   libInfo.Compiler = detail::LibCompiler;
@@ -217,11 +301,33 @@ engine::libInformation engine::getLibInfo()
 #endif
   libInfo.ExternalRenderingModule = tmp;
 
-  libInfo.VTKVersion = std::string(VTK_VERSION) + std::string(" (build ") +
-    std::to_string(VTK_BUILD_VERSION) + std::string(")");
+#if F3D_MODULE_EXR
+  tmp = "ON";
+#else
+  tmp = "OFF";
+#endif
+  libInfo.OpenEXRModule = tmp;
+
+  // First version of VTK including the version check (and the feature used)
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20200527)
+  std::string vtkVersion = std::string(vtkVersion::GetVTKVersionFull());
+  if (!vtkVersion.empty())
+  {
+    libInfo.VTKVersion = vtkVersion;
+    std::string date = std::to_string(vtkVersion::GetVTKBuildVersion());
+    if (date.size() == 8)
+    {
+      libInfo.VTKVersion += std::string(" (date: ") + date + ")";
+    }
+  }
+  else
+#endif
+  {
+    libInfo.VTKVersion = vtkVersion::GetVTKVersion();
+  }
 
   libInfo.PreviousCopyright = "Copyright (C) 2019-2021 Kitware SAS";
-  libInfo.Copyright = "Copyright (C) 2021-2022 Michael Migliore, Mathieu Westphal";
+  libInfo.Copyright = "Copyright (C) 2021-2024 Michael Migliore, Mathieu Westphal";
   libInfo.License = "BSD-3-Clause";
   libInfo.Authors = "Michael Migliore, Mathieu Westphal and Joachim Pouderoux";
 
@@ -243,6 +349,8 @@ std::vector<engine::readerInformation> engine::getReadersInfo()
       info.Description = reader->getLongDescription();
       info.Extensions = reader->getExtensions();
       info.MimeTypes = reader->getMimeTypes();
+      info.HasSceneReader = reader->hasSceneReader();
+      info.HasGeometryReader = reader->hasGeometryReader();
       readersInfo.push_back(info);
     }
   }

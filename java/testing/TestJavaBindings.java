@@ -17,7 +17,7 @@ public class TestJavaBindings {
     Engine.autoloadPlugins();
 
     // Always use try-with-resources idiom to ensure the native engine is released
-    try (Engine engine = new Engine(Window.Type.NATIVE_OFFSCREEN)) {
+    try (Engine engine = new Engine()) {
 
       Camera camera = engine.getWindow().getCamera();
 
@@ -29,8 +29,7 @@ public class TestJavaBindings {
       assert pos[2] == 2.0 : "Position Z is not valid";
 
       Loader loader = engine.getLoader();
-      loader.addFile(args[0] + "data/cow.vtp");
-      loader.loadFile(Loader.LoadFileEnum.LOAD_CURRENT);
+      loader.loadGeometry(args[0] + "data/cow.vtp");
     }
   }
 }

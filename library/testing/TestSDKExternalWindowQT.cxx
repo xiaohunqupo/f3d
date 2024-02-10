@@ -8,18 +8,19 @@
 
 #include "TestSDKHelpers.h"
 
+#include <utility>
+
 class F3DWindow : public QOpenGLWindow
 {
 public:
-  F3DWindow(
-    const std::string& filePath, const std::string& baselinePath, const std::string& outputPath)
+  F3DWindow(const std::string& filePath, std::string baselinePath, std::string outputPath)
     : QOpenGLWindow()
     , mEngine(f3d::window::Type::EXTERNAL)
-    , mBaselinePath(baselinePath)
-    , mOutputPath(outputPath)
+    , mBaselinePath(std::move(baselinePath))
+    , mOutputPath(std::move(outputPath))
   {
     f3d::loader& load = mEngine.getLoader();
-    load.addFile(filePath).loadFile();
+    load.loadGeometry(filePath);
   }
 
 protected:
@@ -36,10 +37,8 @@ protected:
     // before closing, compare the content of the framebuffer with the baseline
     QImage frameBuffer = grabFramebuffer().mirrored().convertToFormat(QImage::Format_RGB888);
 
-    f3d::image img;
-    img.setResolution(frameBuffer.width(), frameBuffer.height())
-      .setChannelCount(3)
-      .setData(frameBuffer.bits());
+    f3d::image img(frameBuffer.width(), frameBuffer.height(), 3);
+    img.setContent(frameBuffer.bits());
 
     if (!TestSDKHelpers::RenderTest(
           img, this->mBaselinePath, this->mOutputPath, "TestSDKExternalWindowQT"))
@@ -50,7 +49,10 @@ protected:
     this->close();
   }
 
-  void paintGL() override { mEngine.getWindow().render(); }
+  void paintGL() override
+  {
+    mEngine.getWindow().render();
+  }
 
 private:
   f3d::engine mEngine;

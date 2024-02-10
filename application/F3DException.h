@@ -7,7 +7,16 @@
 class F3DExNoProcess : public std::runtime_error
 {
 public:
-  F3DExNoProcess(const std::string& what = "")
+  explicit F3DExNoProcess(const std::string& what = "")
+    : std::runtime_error(what)
+  {
+  }
+};
+
+class F3DExFailure : public std::runtime_error
+{
+public:
+  explicit F3DExFailure(const std::string& what = "")
     : std::runtime_error(what)
   {
   }

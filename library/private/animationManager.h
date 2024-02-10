@@ -10,6 +10,7 @@
 #include <vtkProgressBarWidget.h>
 #include <vtkSmartPointer.h>
 
+#include <chrono>
 #include <set>
 
 class vtkF3DRenderer;
@@ -33,10 +34,11 @@ public:
 
   /**
    * Initialize the animation manager, required before playing the animation.
-   * Provided pointers are expected to be not null.
+   * Provided pointers are expected to be not null except interactor.
+   * Return true if at least one animation is available, false otherwise.
    */
-  void Initialize(
-    const options* options, interactor_impl* interactor, window* window, vtkImporter* importer);
+  bool Initialize(
+    const options* options, window* window, interactor_impl* interactor, vtkImporter* importer);
 
   /**
    * Start/Stop playing the animation
@@ -48,7 +50,23 @@ public:
   /**
    * Return true if the animation manager is playing the animation
    */
-  bool IsPlaying() const { return Playing; }
+  bool IsPlaying() const
+  {
+    return Playing;
+  }
+
+  /**
+   * Load animation at provided time value
+   */
+  bool LoadAtTime(double timeValue);
+
+  animationManager(animationManager const&) = delete;
+  void operator=(animationManager const&) = delete;
+
+  /**
+   * Set a time range pointer to the current time range values
+   */
+  void GetTimeRange(double timeRange[2]);
 
 protected:
   /**
@@ -57,23 +75,19 @@ protected:
   void Tick();
 
   vtkImporter* Importer = nullptr;
-  window* Window;
-  interactor_impl* Interactor;
-  const options* Options;
+  window* Window = nullptr;
+  interactor_impl* Interactor = nullptr;
+  const options* Options = nullptr;
 
-  std::set<double> TimeSteps;
-  std::set<double>::iterator CurrentTimeStep;
-  double FrameRate = 30;
   double TimeRange[2] = { 0.0, 0.0 };
   bool Playing = false;
   bool HasAnimation = false;
   unsigned long CallBackId = 0;
+  double CurrentTime = 0;
+  bool CurrentTimeSet = false;
+  std::chrono::steady_clock::time_point PreviousTick;
 
   vtkSmartPointer<vtkProgressBarWidget> ProgressWidget;
-
-private:
-  animationManager(animationManager const&) = delete;
-  void operator=(animationManager const&) = delete;
 };
 }
 }

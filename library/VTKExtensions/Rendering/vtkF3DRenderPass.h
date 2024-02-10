@@ -42,6 +42,9 @@ public:
   vtkSetVector6Macro(Bounds, double);
   vtkSetMacro(CircleOfConfusionRadius, double);
 
+  vtkF3DRenderPass(const vtkF3DRenderPass&) = delete;
+  void operator=(const vtkF3DRenderPass&) = delete;
+
 protected:
   vtkF3DRenderPass() = default;
   ~vtkF3DRenderPass() override = default;
@@ -61,6 +64,7 @@ protected:
   double CircleOfConfusionRadius = 20.0;
 
   vtkSmartPointer<vtkFramebufferPass> BackgroundPass;
+  vtkSmartPointer<vtkFramebufferPass> OverlayPass;
   vtkSmartPointer<vtkFramebufferPass> MainPass;
 
   double Bounds[6] = {};
@@ -68,13 +72,10 @@ protected:
   vtkMTimeType InitializeTime = 0;
 
   std::vector<vtkProp*> BackgroundProps;
+  std::vector<vtkProp*> OverlayProps;
   std::vector<vtkProp*> MainProps;
 
   std::shared_ptr<vtkOpenGLQuadHelper> BlendQuadHelper;
-
-private:
-  vtkF3DRenderPass(const vtkF3DRenderPass&) = delete;
-  void operator=(const vtkF3DRenderPass&) = delete;
 };
 
 #endif

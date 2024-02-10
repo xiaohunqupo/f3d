@@ -1,9 +1,13 @@
 #include "vtkF3DPolyDataMapper.h"
 
+#include "F3DLog.h"
+
 #include <vtkActor.h>
 #include <vtkDoubleArray.h>
 #include <vtkMatrix4x4.h>
 #include <vtkObjectFactory.h>
+#include <vtkOpenGLRenderWindow.h>
+#include <vtkOpenGLRenderer.h>
 #include <vtkOpenGLVertexBufferObject.h>
 #include <vtkOpenGLVertexBufferObjectGroup.h>
 #include <vtkPointData.h>
@@ -11,6 +15,7 @@
 #include <vtkProperty.h>
 #include <vtkShaderProgram.h>
 #include <vtkShaderProperty.h>
+#include <vtkTexture.h>
 #include <vtkUniforms.h>
 #include <vtkVersion.h>
 
@@ -19,7 +24,11 @@ vtkStandardNewMacro(vtkF3DPolyDataMapper);
 //-----------------------------------------------------------------------------
 vtkF3DPolyDataMapper::vtkF3DPolyDataMapper()
 {
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 2, 20230518)
+  this->SetVBOShiftScaleMethod(vtkPolyDataMapper::ShiftScaleMethodType::DISABLE_SHIFT_SCALE);
+#else
   this->SetVBOShiftScaleMethod(vtkOpenGLVertexBufferObject::DISABLE_SHIFT_SCALE);
+#endif
 
   // map glTF arrays to GPU VBOs
   this->MapDataArrayToVertexAttribute(
@@ -124,25 +133,81 @@ void vtkF3DPolyDataMapper::ReplaceShaderValues(
   type = uniforms->GetUniformTupleType("jointMatrices");
   if (type != vtkUniforms::TupleTypeInvalid)
   {
-    customDecl += "in vec4 joints;\n"
-                  "in vec4 weights;\n";
+    int nbJoints = uniforms->GetUniformNumberOfTuples("jointMatrices");
 
-    // compute skinning matrix with current uniform weights
-    beginImpl += "  mat4 skinMat = weights.x * jointMatrices[int(joints.x)]\n"
-                 "               + weights.y * jointMatrices[int(joints.y)]\n"
-                 "               + weights.z * jointMatrices[int(joints.z)]\n"
-                 "               + weights.w * jointMatrices[int(joints.w)];\n";
+    bool skinningSupported = true;
 
-    posImpl += "  posMC = skinMat * posMC;\n";
-
-    // apply the matrix to normals and tangents
-    if (hasNormals)
+    // The number of uniform values required by OpenGL is 4096
+    // Since a mat4 is 16 values, it means we can only support 256 bones
+    // However, there are other uniform values used in practice for other
+    // things like materials and we've seen issues starting at 253 bones
+    // let's be conservative here and trigger SSBO at 250 bones
+    if (nbJoints > 250)
     {
-      normalImpl += "  normalVCVSOutput = mat3(skinMat) * normalVCVSOutput;\n";
+#if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 3, 20231108)
+      vtkOpenGLRenderWindow* renWin = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
+      assert(renWin);
+
+      int major, minor;
+      renWin->GetOpenGLVersion(major, minor);
+
+      // 4.3 is required for SSBO
+      if (major == 4 && minor >= 3)
+      {
+        std::vector<float> buffer(16 * sizeof(float) * nbJoints);
+        uniforms->GetUniformMatrix4x4v("jointMatrices", buffer);
+
+        this->JointMatrices->Upload(buffer, vtkOpenGLBufferObject::ArrayBuffer);
+        this->JointMatrices->BindShaderStorage(0);
+
+        uniforms->RemoveUniform("jointMatrices");
+
+        customDecl += "layout(std430, binding = 0) readonly buffer JointsData\n"
+                      "{\n"
+                      "  mat4 jointMatrices[];\n"
+                      "};\n";
+
+        vtkShaderProgram::Substitute(VSSource, "//VTK::System::Dec", "#version 430");
+      }
+      else
+      {
+        std::string msg = "A mesh is associated with more than 250 bones (" +
+          std::to_string(nbJoints) + "), which requires OpenGL >= 4.3";
+        F3DLog::Print(F3DLog::Severity::Warning, msg);
+
+        skinningSupported = false;
+      }
+#else
+      std::string msg = "A mesh is associated with more than 250 bones (" +
+        std::to_string(nbJoints) + "), which is not supported by VTK < 9.3.20231108";
+      F3DLog::Print(F3DLog::Severity::Warning, msg);
+
+      skinningSupported = false;
+#endif
     }
-    if (hasTangents)
+
+    if (skinningSupported)
     {
-      normalImpl += "  tangentVCVSOutput = mat3(skinMat) * tangentVCVSOutput;\n";
+      customDecl += "in vec4 joints;\n"
+                    "in vec4 weights;\n";
+
+      // compute skinning matrix with current uniform weights
+      beginImpl += "  mat4 skinMat = weights.x * jointMatrices[int(joints.x)]\n"
+                   "               + weights.y * jointMatrices[int(joints.y)]\n"
+                   "               + weights.z * jointMatrices[int(joints.z)]\n"
+                   "               + weights.w * jointMatrices[int(joints.w)];\n";
+
+      posImpl += "  posMC = skinMat * posMC;\n";
+
+      // apply the matrix to normals and tangents
+      if (hasNormals)
+      {
+        normalImpl += "  normalVCVSOutput = mat3(skinMat) * normalVCVSOutput;\n";
+      }
+      if (hasTangents)
+      {
+        normalImpl += "  tangentVCVSOutput = mat3(skinMat) * tangentVCVSOutput;\n";
+      }
     }
   }
 
@@ -176,3 +241,105 @@ void vtkF3DPolyDataMapper::ReplaceShaderValues(
 
   this->Superclass::ReplaceShaderValues(shaders, ren, actor);
 }
+
+//-----------------------------------------------------------------------------
+bool vtkF3DPolyDataMapper::RenderWithMatCap(vtkActor* actor)
+{
+  // check if we have normals
+  if (this->VBOs->GetNumberOfComponents("normalMC") != 3)
+  {
+    return false;
+  }
+
+  auto textures = actor->GetProperty()->GetAllTextures();
+  auto fn = [](const std::pair<std::string, vtkTexture*>& tex) { return tex.first == "matcap"; };
+  return std::find_if(textures.begin(), textures.end(), fn) != textures.end();
+}
+
+//-----------------------------------------------------------------------------
+void vtkF3DPolyDataMapper::ReplaceShaderColor(
+  std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* actor)
+{
+  if (this->RenderWithMatCap(actor))
+  {
+    auto fragmentShader = shaders[vtkShader::Fragment];
+    auto FSSource = fragmentShader->GetSource();
+
+    std::string customLight = "//VTK::Color::Impl\n"
+                              "vec2 uv = vec2(normalVCVSOutput.xy) * 0.5 + vec2(0.5,0.5);\n"
+                              "vec3 diffuseColor = vec3(0.0);\n"
+                              "vec3 ambientColor = texture(matcap, uv).rgb;\n";
+
+    vtkShaderProgram::Substitute(FSSource, "//VTK::Color::Impl", customLight);
+    fragmentShader->SetSource(FSSource);
+  }
+  else
+  {
+    this->Superclass::ReplaceShaderColor(shaders, ren, actor);
+  }
+}
+
+//-----------------------------------------------------------------------------
+void vtkF3DPolyDataMapper::ReplaceShaderLight(
+  std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* actor)
+{
+  if (this->RenderWithMatCap(actor))
+  {
+    auto fragmentShader = shaders[vtkShader::Fragment];
+    auto FSSource = fragmentShader->GetSource();
+
+    // set final color to gamma-corrected ambient color
+    std::string customLight = "//VTK::Light::Impl\n"
+                              "gl_FragData[0] = vec4(pow(ambientColor, vec3(1.0/2.2)), 1.0);\n";
+
+    vtkShaderProgram::Substitute(FSSource, "//VTK::Light::Impl", customLight);
+    fragmentShader->SetSource(FSSource);
+  }
+  else
+  {
+    this->Superclass::ReplaceShaderLight(shaders, ren, actor);
+  }
+}
+
+//-----------------------------------------------------------------------------
+void vtkF3DPolyDataMapper::ReplaceShaderTCoord(
+  std::map<vtkShader::Type, vtkShader*> shaders, vtkRenderer* ren, vtkActor* actor)
+{
+  if (this->RenderWithMatCap(actor))
+  {
+    // disable default behavior of VTK with textures to avoid blending with itself
+    auto fragmentShader = shaders[vtkShader::Fragment];
+    std::string FSSource = fragmentShader->GetSource();
+
+    vtkShaderProgram::Substitute(FSSource, "//VTK::TCoord::Impl", "");
+
+    fragmentShader->SetSource(FSSource);
+  }
+
+  this->Superclass::ReplaceShaderTCoord(shaders, ren, actor);
+}
+
+#if VTK_VERSION_NUMBER < VTK_VERSION_CHECK(9, 3, 20230902)
+// Integrated in VTK in https://gitlab.kitware.com/vtk/vtk/-/merge_requests/10456
+//------------------------------------------------------------------------------
+bool vtkF3DPolyDataMapper::GetNeedToRebuildShaders(
+  vtkOpenGLHelper& cellBO, vtkRenderer* ren, vtkActor* actor)
+{
+  bool ret = this->Superclass::GetNeedToRebuildShaders(cellBO, ren, actor);
+
+  vtkOpenGLRenderer* oren = static_cast<vtkOpenGLRenderer*>(ren);
+  vtkTexture* envTexture = oren->GetEnvironmentTexture();
+  if (this->EnvTexture != envTexture ||
+    (envTexture && envTexture->GetMTime() > this->EnvTextureTime))
+  {
+    ret = true;
+    this->EnvTexture = envTexture;
+    if (envTexture)
+    {
+      this->EnvTextureTime = envTexture->GetMTime();
+    }
+  }
+
+  return ret;
+}
+#endif

@@ -6,7 +6,7 @@
  * The list of supported file format is available here:
  * https://github.com/assimp/assimp/blob/master/doc/Fileformats.md
  *
- * The following formats have been tested and are supported by f3d: FBX, DAE, OFF, DXF
+ * The following formats have been tested and are supported by f3d: FBX, DAE, OFF, DXF, X, 3MF
  */
 
 #ifndef vtkF3DAssimpImporter_h
@@ -33,9 +33,9 @@ public:
   ///@}
 
   /**
-   * Update actors at the given timestep.
+   * Update actors at the given time value.
    */
-  void UpdateTimeStep(double timestep) override;
+  void UpdateTimeStep(double timeValue) override;
 
   /**
    * Get the number of available animations.
@@ -71,9 +71,8 @@ public:
   ///@}
 
   /**
-   * Get temporal information for the currently enabled animations.
-   * the three returned arguments can be defined, or not.
-   * Return true in case of success, false otherwise.
+   * Get temporal information for the currently enabled animation.
+   * Only defines timerange and ignore provided frameRate.
    */
 // Complete GetTemporalInformation needs https://gitlab.kitware.com/vtk/vtk/-/merge_requests/7246
 #if VTK_VERSION_NUMBER >= VTK_VERSION_CHECK(9, 0, 20201016)

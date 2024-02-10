@@ -1,2 +1,11 @@
 .vscode
 _site
+.vs
+CMakeUserPresets.json
+build/
+_skbuild
+dist
+*.egg-info
+__pycache__
+*.pyc
+_version.py

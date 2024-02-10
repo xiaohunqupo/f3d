@@ -1,4 +1,15 @@
-include(${CMAKE_SOURCE_DIR}/cmake/f3dPlugin.cmake)
+cmake_minimum_required(VERSION 3.21)
+
+project(f3d-plugin-native)
+
+include(GNUInstallDirs)
+
+# Only internal build is supported for static plugins
+if(PROJECT_IS_TOP_LEVEL)
+  message(FATAL_ERROR "native plugin cannot be built externally")
+endif()
+
+include(f3dPlugin)
 
 f3d_plugin_init()
 
@@ -94,6 +105,7 @@ f3d_plugin_declare_reader(
   MIMETYPES application/x-tgif
   VTK_READER vtkTIFFReader
   FORMAT_DESCRIPTION "TIFF"
+  EXCLUDE_FROM_THUMBNAILER
 )
 
 f3d_plugin_declare_reader(
@@ -167,15 +179,26 @@ f3d_plugin_declare_reader(
   FORMAT_DESCRIPTION "VTK XML MultiBlock"
 )
 
+
+f3d_plugin_declare_reader(
+  NAME Splat
+  SCORE 90
+  EXTENSIONS splat
+  MIMETYPES application/vnd.splat
+  VTK_READER vtkF3DSplatReader
+  FORMAT_DESCRIPTION "3D Gaussian splats"
+)
+
 f3d_plugin_build(
   NAME native
   VERSION 1.0
   DESCRIPTION "Native VTK I/O support"
-  VTK_MODULES CommonCore CommonExecutionModel IOImport IOXML IOParallel IOCityGML IOImage IOGeometry IOPLY
+  VTK_MODULES IOXML IOParallel IOCityGML IOImage IOGeometry IOPLY
   MIMETYPE_XML_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/f3d-3d-formats.xml"
     "${CMAKE_CURRENT_SOURCE_DIR}/f3d-3d-image-formats.xml"
     "${CMAKE_CURRENT_SOURCE_DIR}/f3d-vtk-formats.xml"
+  CONFIGURATION_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/configs/config.d" "${CMAKE_CURRENT_SOURCE_DIR}/configs/thumbnail.d"
   FREEDESKTOP
   FORCE_STATIC
 )

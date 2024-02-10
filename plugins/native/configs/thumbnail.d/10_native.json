@@ -1,0 +1,31 @@
+{
+  ".*(dcm|nrrd|mhd|mha|vti)":
+  {
+    "volume": true
+  },
+  ".*(3ds|stl)":
+  {
+    "up": "+Z",
+    "camera-direction": "-1,1,-0.5"
+  },
+  ".*(ply)":
+  {
+    "comp": "-2",
+    "translucency-support": true
+  },
+  ".*(splat)":
+  {
+    "point-sprites": true,
+    "point-size": 1,
+    "point-type": "gaussian",
+    "scalars": "color",
+    "comp": "-2",
+    "up": "-Y",
+    "camera-position": "0,1,-5.2",
+    "camera-focal-point": "0,1,0",
+    "tone-mapping": false,
+    "grid": false,
+    "anti-aliasing": false,
+    "translucency-support": false
+  }
+}

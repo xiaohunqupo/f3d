@@ -17,6 +17,8 @@
 #include <map>
 
 class vtkCornerAnnotation;
+class vtkF3DDropZoneActor;
+class vtkImageReader2;
 class vtkOrientationMarkerWidget;
 class vtkSkybox;
 class vtkTextActor;
@@ -24,7 +26,6 @@ class vtkTextActor;
 class vtkF3DRenderer : public vtkOpenGLRenderer
 {
 public:
-  static vtkF3DRenderer* New();
   vtkTypeMacro(vtkF3DRenderer, vtkOpenGLRenderer);
 
   ///@{
@@ -32,12 +33,14 @@ public:
    * Set visibility of different actors
    */
   void ShowAxis(bool show);
-  void ShowGrid(bool show, double unitSquare = 0, int subdivisions = 10);
+  void ShowGrid(bool show);
   void ShowEdge(bool show);
   void ShowTimer(bool show);
   void ShowMetaData(bool show);
   void ShowFilename(bool show);
   void ShowCheatSheet(bool show);
+  void ShowDropZone(bool show);
+  void ShowHDRISkybox(bool show);
   ///@}
 
   using vtkOpenGLRenderer::SetBackground;
@@ -46,11 +49,17 @@ public:
    * Set different actors parameters
    */
   void SetLineWidth(double lineWidth);
-  virtual void SetPointSize(double pointSize);
+  void SetPointSize(double pointSize);
   void SetFontFile(const std::string& fontFile);
   void SetHDRIFile(const std::string& hdriFile);
+  void SetUseImageBasedLighting(bool use) override;
   void SetBackground(const double* backgroundColor) override;
   void SetLightIntensity(const double intensity);
+  void SetFilenameInfo(const std::string& info);
+  void SetDropZoneInfo(const std::string& info);
+  void SetGridAbsolute(bool absolute);
+  void SetGridUnitSquare(double unitSquare);
+  void SetGridSubdivisions(int subdivisions);
   ///@}
 
   ///@{
@@ -76,10 +85,33 @@ public:
   vtkGetMacro(UseTrackball, bool);
   ///@}
 
+  ///@{
   /**
-   * Reimplemented to handle cheat sheet and timer
+   * Set/Get InvertZoom
+   */
+  vtkSetMacro(InvertZoom, bool);
+  vtkGetMacro(InvertZoom, bool);
+  ///@}
+
+  /**
+   * Reimplemented to configure:
+   *  - ActorsProperties
+   *  - CheatSheet
+   *  - Timer
+   * before actual rendering, only when needed
    */
   void Render() override;
+
+  /**
+   * Reimplemented to account for grid actor
+   */
+  void ResetCameraClippingRange() override;
+
+  /**
+   * Update actors according to the properties of this class:
+   *  - Grid
+   */
+  virtual void UpdateActors();
 
   /**
    * Reimplemented to handle light creation when no lights are added
@@ -91,17 +123,12 @@ public:
    * Initialize the renderer actors and flags.
    * Should be called after being added to a vtkRenderWindow.
    */
-  virtual void Initialize(const std::string& fileInfo, const std::string& up);
+  virtual void Initialize(const std::string& up);
 
   /**
    * Get the OpenGL skybox
    */
-  vtkGetObjectMacro(Skybox, vtkSkybox);
-
-  /**
-   * Setup the different render passes
-   */
-  void SetupRenderPasses();
+  vtkGetObjectMacro(SkyboxActor, vtkSkybox);
 
   /**
    * Return description about the current rendering status
@@ -120,9 +147,9 @@ public:
   vtkGetVector3Macro(RightVector, double);
 
   /**
-   * Set cache path
+   * Set cache path, only used by the HDRI logic
    */
-  vtkSetMacro(CachePath, std::string);
+  void SetCachePath(const std::string& cachePath);
 
 protected:
   vtkF3DRenderer();
@@ -131,12 +158,61 @@ protected:
   void ReleaseGraphicsResources(vtkWindow* w) override;
 
   bool IsBackgroundDark();
-  void UpdateTextColor();
 
   /**
-   * Update the text of the cheatsheet and mark it for rendering
+   * Configure meta data actor visibility and content
    */
-  void UpdateCheatSheet();
+  void ConfigureMetaData();
+
+  /**
+   * Configure text actors properties font file and color
+   */
+  void ConfigureTextActors();
+
+  ///@{
+  /**
+   * Configure HDRI actor and related lighting textures
+   */
+  void ConfigureHDRI();
+  void ConfigureHDRIReader();
+  void ConfigureHDRIHash();
+  void ConfigureHDRITexture();
+  void ConfigureHDRILUT();
+  void ConfigureHDRISphericalHarmonics();
+  void ConfigureHDRISpecular();
+  void ConfigureHDRISkybox();
+  ///@}
+
+  ///@{
+  /**
+   * Methods to check if certain HDRI caches are available
+   */
+  bool CheckForSpecCache(std::string& path);
+  bool CheckForSHCache(std::string& path);
+  ///@}
+
+  /**
+   * Configure all actors properties according to what has been set for:
+   * - point size
+   * - line width
+   * - show edges
+   */
+  void ConfigureActorsProperties();
+
+  /**
+   * Configure the cheatsheet text and mark it for rendering
+   */
+  void ConfigureCheatSheet();
+
+  /**
+   * Configure the grid
+   */
+  void ConfigureGridUsingCurrentActors();
+
+  /**
+   * Configure the different render passes
+   */
+  void ConfigureRenderPasses();
 
   /**
    * Add related hotkeys options to the cheatsheet.
@@ -147,11 +223,13 @@ protected:
   /**
    * Override to generate a data description
    */
-  virtual std::string GenerateMetaDataDescription();
+  virtual std::string GenerateMetaDataDescription() = 0;
 
-  vtkNew<vtkActor> GridActor;
+  /**
+   * Create a cache directory if a HDRIHash is set
+   */
+  void CreateCacheDirectory();
 
-  vtkNew<vtkSkybox> Skybox;
   vtkNew<vtkCamera> InitialCamera;
 
   vtkSmartPointer<vtkOrientationMarkerWidget> AxisWidget;
@@ -159,19 +237,39 @@ protected:
   vtkNew<vtkCornerAnnotation> FilenameActor;
   vtkNew<vtkCornerAnnotation> MetaDataActor;
   vtkNew<vtkCornerAnnotation> CheatSheetActor;
-  bool CheatSheetNeedUpdate = false;
+  vtkNew<vtkF3DDropZoneActor> DropZoneActor;
+  vtkNew<vtkActor> GridActor;
+  vtkNew<vtkSkybox> SkyboxActor;
 
   // vtkCornerAnnotation building is too slow for the timer
   vtkNew<vtkTextActor> TimerActor;
   unsigned int Timer = 0;
 
+  bool CheatSheetConfigured = false;
+  bool ActorsPropertiesConfigured = false;
+  bool GridConfigured = false;
+  bool RenderPassesConfigured = false;
+  bool LightIntensitiesConfigured = false;
+  bool TextActorsConfigured = false;
+  bool MetaDataConfigured = false;
+  bool HDRIReaderConfigured = false;
+  bool HDRIHashConfigured = false;
+  bool HDRITextureConfigured = false;
+  bool HDRILUTConfigured = false;
+  bool HDRISphericalHarmonicsConfigured = false;
+  bool HDRISpecularConfigured = false;
+  bool HDRISkyboxConfigured = false;
+
   bool GridVisible = false;
+  bool GridAbsolute = false;
   bool AxisVisible = false;
   bool EdgeVisible = false;
   bool TimerVisible = false;
   bool FilenameVisible = false;
   bool MetaDataVisible = false;
   bool CheatSheetVisible = false;
+  bool DropZoneVisible = false;
+  bool HDRISkyboxVisible = false;
   bool UseRaytracing = false;
   bool UseRaytracingDenoiser = false;
   bool UseDepthPeelingPass = false;
@@ -180,16 +278,30 @@ protected:
   bool UseToneMappingPass = false;
   bool UseBlurBackground = false;
   bool UseTrackball = false;
+  bool InvertZoom = false;
 
-  bool GridInitialized = false;
   int RaytracingSamples = 0;
   int UpIndex = 1;
   double UpVector[3] = { 0.0, 1.0, 0.0 };
   double RightVector[3] = { 1.0, 0.0, 0.0 };
   double CircleOfConfusionRadius = 20.0;
+  double PointSize = 10.0;
+  double LineWidth = 1.0;
+  double GridUnitSquare = 0.0;
+  int GridSubdivisions = 10;
 
-  bool HasHDRI = false;
   std::string HDRIFile;
+  vtkSmartPointer<vtkImageReader2> HDRIReader;
+  bool HasValidHDRIReader = false;
+  bool UseDefaultHDRI = false;
+  std::string HDRIHash;
+  bool HasValidHDRIHash = false;
+  vtkSmartPointer<vtkTexture> HDRITexture;
+  bool HasValidHDRITexture = false;
+  bool HasValidHDRILUT = false;
+  bool HasValidHDRISH = false;
+  bool HasValidHDRISpec = false;
+
   std::string FontFile;
 
   double LightIntensity = 1.0;

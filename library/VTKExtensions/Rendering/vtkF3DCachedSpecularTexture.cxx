@@ -22,6 +22,11 @@ void vtkF3DCachedSpecularTexture::PrintSelf(ostream& os, vtkIndent indent)
 //------------------------------------------------------------------------------
 void vtkF3DCachedSpecularTexture::Load(vtkRenderer* ren)
 {
+  if (!this->UseCache)
+  {
+    return this->Superclass::Load(ren);
+  }
+
   if (this->GetMTime() > this->LoadTime.GetMTime())
   {
     vtkOpenGLRenderWindow* renWin = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
@@ -52,7 +57,7 @@ void vtkF3DCachedSpecularTexture::Load(vtkRenderer* ren)
 
     unsigned int nbLevels = mb->GetNumberOfBlocks();
 
-    this->TextureObject->SetMaxLevel(nbLevels - 1);
+    this->TextureObject->SetMaxLevel(static_cast<int>(nbLevels) - 1);
 
     vtkImageData* firstImg = vtkImageData::SafeDownCast(mb->GetBlock(0));
 
@@ -63,7 +68,13 @@ void vtkF3DCachedSpecularTexture::Load(vtkRenderer* ren)
     }
 
     int* firstDims = firstImg->GetDimensions();
-    this->TextureObject->CreateCubeFromRaw(firstDims[0], firstDims[1], 3, VTK_FLOAT, data);
+    if (firstDims[0] != firstDims[1])
+    {
+      vtkWarningMacro("Specular cache has unexpected dimensions");
+    }
+    this->PrefilterSize = firstDims[0];
+    this->TextureObject->CreateCubeFromRaw(
+      this->PrefilterSize, this->PrefilterSize, 3, VTK_FLOAT, data);
 
     // the mip levels are manually uploaded because there is no abstraction in VTK
     for (unsigned int i = 1; i < nbLevels; i++)
@@ -73,9 +84,9 @@ void vtkF3DCachedSpecularTexture::Load(vtkRenderer* ren)
 
       for (int j = 0; j < 6; j++)
       {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + j, i,
-          this->TextureObject->GetInternalFormat(VTK_FLOAT, 3, false), dims[0], dims[1], 0,
-          this->TextureObject->GetFormat(VTK_FLOAT, 3, false),
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + j, static_cast<GLint>(i),
+          this->TextureObject->GetInternalFormat(VTK_FLOAT, 3, false), static_cast<GLint>(dims[0]),
+          static_cast<GLint>(dims[1]), 0, this->TextureObject->GetFormat(VTK_FLOAT, 3, false),
           this->TextureObject->GetDataType(VTK_FLOAT), img->GetScalarPointer(0, 0, j));
       }
     }
